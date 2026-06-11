@@ -1,6 +1,6 @@
 /* Service worker : mise en cache de l'app shell pour un fonctionnement
    hors ligne complet. Incrémenter VERSION à chaque déploiement. */
-const VERSION = 'lecture-v1';
+const VERSION = 'lecture-v2';
 const ASSETS = [
   './',
   './index.html',
@@ -11,7 +11,13 @@ const ASSETS = [
   './icons/icon-180.png',
   './icons/icon-192.png',
   './icons/icon-512.png',
-  './icons/icon-maskable-512.png'
+  './icons/icon-maskable-512.png',
+  // Moteur OCR local (scan de citations), disponible hors ligne
+  './vendor/tesseract/tesseract.min.js',
+  './vendor/tesseract/worker.min.js',
+  './vendor/tesseract/tesseract-core-simd-lstm.wasm.js',
+  './vendor/tesseract/tesseract-core-lstm.wasm.js',
+  './vendor/tesseract/lang/fra.traineddata.gz'
 ];
 
 self.addEventListener('install', (event) => {

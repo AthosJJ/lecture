@@ -172,6 +172,12 @@
           <span>Note</span>
           <textarea name="text" rows="6" required placeholder="Vos réflexions…"></textarea>
         </label>
+        <div class="capture-row">
+          <button type="button" class="cap-btn" id="btn-dictate-note">
+            <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3" stroke="currentColor" stroke-width="1.8" fill="none"/><path d="M5.5 11.5a6.5 6.5 0 0 0 13 0M12 18.5V21" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" fill="none"/></svg>
+            <span class="cap-label">Dicter</span>
+          </button>
+        </div>
         <button type="submit" class="primary-btn">Enregistrer</button>
         <button type="button" class="danger-btn" id="btn-delete-note" hidden>Supprimer</button>
       </form>
@@ -185,6 +191,25 @@
           <span>Citation *</span>
           <textarea name="text" rows="5" required placeholder="« … »"></textarea>
         </label>
+        <div class="capture-row">
+          <button type="button" class="cap-btn" id="btn-dictate-quote">
+            <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3" stroke="currentColor" stroke-width="1.8" fill="none"/><path d="M5.5 11.5a6.5 6.5 0 0 0 13 0M12 18.5V21" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" fill="none"/></svg>
+            <span class="cap-label">Dicter</span>
+          </button>
+          <button type="button" class="cap-btn" id="btn-scan-quote">
+            <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M4 7.5h3.2L9 5.5h6l1.8 2H20a0 0 0 0 1 0 0v11H4v-11Z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" fill="none"/><circle cx="12" cy="12.5" r="3.2" stroke="currentColor" stroke-width="1.8" fill="none"/></svg>
+            <span class="cap-label">Scanner du texte</span>
+          </button>
+        </div>
+        <div class="ocr-panel" id="ocr-panel" hidden>
+          <p class="ocr-status" id="ocr-status"></p>
+          <div class="ocr-lines" id="ocr-lines"></div>
+          <div class="ocr-actions" id="ocr-actions" hidden>
+            <button type="button" class="primary-btn small" id="ocr-insert">Insérer la sélection</button>
+            <button type="button" class="row-btn small" id="ocr-cancel">Annuler</button>
+          </div>
+        </div>
+        <input type="file" id="ocr-file" accept="image/*" hidden>
         <div class="field-row">
           <label class="field">
             <span>Page</span>

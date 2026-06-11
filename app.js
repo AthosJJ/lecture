@@ -391,6 +391,8 @@ function openSheet(id) {
 
 function closeSheet() {
   if (!openedSheet) return;
+  stopDictation();
+  closeOcrPanel();
   const sheet = openedSheet;
   const backdrop = $('#backdrop');
   sheet.classList.remove('open');
@@ -520,6 +522,7 @@ async function saveNoteForm(e) {
 function openQuoteForm(quote = null) {
   const form = $('#form-quote');
   form.reset();
+  closeOcrPanel();
   state.editing.quoteId = quote ? quote.id : null;
   $('#sheet-quote-title').textContent = quote ? 'Modifier la citation' : 'Nouvelle citation';
   form.text.value = quote ? quote.text : '';
@@ -646,6 +649,153 @@ async function importJSONFile(file) {
   }
 }
 
+/* ═══════════ DICTÉE (Web Speech API) ═══════════ */
+
+let recog = null;
+let recogBtn = null;
+
+function speechSupported() {
+  return Boolean(window.SpeechRecognition || window.webkitSpeechRecognition);
+}
+
+function stopDictation() {
+  if (recog) { try { recog.stop(); } catch { /* déjà arrêtée */ } }
+}
+
+function toggleDictation(textarea, btn) {
+  if (recog) { stopDictation(); return; }
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  const r = new SR();
+  r.lang = 'fr-FR';
+  r.continuous = true;
+  r.interimResults = true;
+  const base = textarea.value.trim();
+  r.onresult = (e) => {
+    let transcript = '';
+    for (const res of e.results) transcript += res[0].transcript;
+    textarea.value = (base ? base + ' ' : '') + transcript.trim();
+  };
+  r.onerror = (e) => {
+    if (e.error === 'not-allowed' || e.error === 'service-not-allowed') {
+      toast('Micro refusé — autorisez la dictée, ou utilisez le micro du clavier.');
+    } else if (e.error !== 'aborted' && e.error !== 'no-speech') {
+      toast('Dictée interrompue');
+    }
+  };
+  r.onend = () => {
+    if (recogBtn) {
+      recogBtn.classList.remove('rec');
+      recogBtn.querySelector('.cap-label').textContent = 'Dicter';
+    }
+    recog = null;
+    recogBtn = null;
+  };
+  recog = r;
+  recogBtn = btn;
+  btn.classList.add('rec');
+  btn.querySelector('.cap-label').textContent = 'Arrêter';
+  r.start();
+}
+
+/* ═══════════ SCAN DE TEXTE (OCR Tesseract.js, 100 % local) ═══════════ */
+
+let ocrWorker = null;
+
+function ocrStatus(msg) { $('#ocr-status').textContent = msg; }
+
+function closeOcrPanel() {
+  $('#ocr-panel').hidden = true;
+  $('#ocr-lines').innerHTML = '';
+  $('#ocr-actions').hidden = true;
+}
+
+function loadScript(src) {
+  return new Promise((resolve, reject) => {
+    const s = document.createElement('script');
+    s.src = src;
+    s.onload = resolve;
+    s.onerror = () => reject(new Error('échec de chargement : ' + src));
+    document.head.appendChild(s);
+  });
+}
+
+/* Les chemins doivent être absolus : le worker OCR résout les URLs
+   relatives par rapport à son propre fichier, pas à la page. */
+const vendorURL = (p) => new URL(p, document.baseURI).href;
+
+async function getOcrWorker() {
+  if (ocrWorker) return ocrWorker;
+  if (!window.Tesseract) {
+    ocrStatus('Chargement du moteur de reconnaissance…');
+    await loadScript('./vendor/tesseract/tesseract.min.js');
+  }
+  ocrStatus('Initialisation du moteur…');
+  ocrWorker = await Tesseract.createWorker('fra', 1, {
+    workerPath: vendorURL('vendor/tesseract/worker.min.js'),
+    corePath: vendorURL('vendor/tesseract'),
+    langPath: vendorURL('vendor/tesseract/lang'),
+    gzip: true,
+    logger: (m) => {
+      if (m.status === 'recognizing text') {
+        ocrStatus(`Reconnaissance… ${Math.round(m.progress * 100)} %`);
+      }
+    }
+  });
+  return ocrWorker;
+}
+
+/* Réduit la photo avant l'OCR : plus rapide, et largement suffisant. */
+async function downscaleImage(file, max = 1600) {
+  const url = URL.createObjectURL(file);
+  try {
+    const img = new Image();
+    img.src = url;
+    await img.decode();
+    const scale = Math.min(1, max / Math.max(img.naturalWidth, img.naturalHeight));
+    if (scale === 1) return file;
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.round(img.naturalWidth * scale);
+    canvas.height = Math.round(img.naturalHeight * scale);
+    canvas.getContext('2d').drawImage(img, 0, 0, canvas.width, canvas.height);
+    return await new Promise((res) => canvas.toBlob(res, 'image/jpeg', 0.92));
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+
+async function runOCR(file) {
+  $('#ocr-panel').hidden = false;
+  $('#ocr-lines').innerHTML = '';
+  $('#ocr-actions').hidden = true;
+  ocrStatus('Préparation de la photo…');
+  try {
+    const image = await downscaleImage(file);
+    const worker = await getOcrWorker();
+    ocrStatus('Reconnaissance…');
+    const { data } = await worker.recognize(image);
+    const lines = data.text.split('\n').map((l) => l.trim()).filter(Boolean);
+    if (!lines.length) {
+      ocrStatus('Aucun texte reconnu. Réessayez avec une photo nette et bien éclairée.');
+      return;
+    }
+    ocrStatus('Touchez une ligne pour l’inclure ou l’exclure, puis insérez.');
+    $('#ocr-lines').innerHTML = lines.map((l) =>
+      `<button type="button" class="ocr-line on">${esc(l)}</button>`).join('');
+    $('#ocr-actions').hidden = false;
+  } catch {
+    ocrStatus('Échec de la reconnaissance. Réessayez avec une photo plus nette.');
+  }
+}
+
+function insertOcrSelection() {
+  const selected = $$('#ocr-lines .ocr-line.on').map((b) => b.textContent.trim());
+  if (!selected.length) { toast('Aucune ligne sélectionnée'); return; }
+  const ta = $('#form-quote').text;
+  const text = selected.join(' ');
+  ta.value = ta.value.trim() ? ta.value.trim() + '\n' + text : text;
+  closeOcrPanel();
+}
+
 /* ═══════════ ÉVÉNEMENTS ═══════════ */
 
 function bindEvents() {
@@ -753,6 +903,28 @@ function bindEvents() {
   $('#btn-delete-book').addEventListener('click', deleteCurrentBook);
   $('#form-note').addEventListener('submit', saveNoteForm);
   $('#form-quote').addEventListener('submit', saveQuoteForm);
+
+  // Dictée & scan
+  const dictateQuoteBtn = $('#btn-dictate-quote');
+  const dictateNoteBtn = $('#btn-dictate-note');
+  if (!speechSupported()) {
+    dictateQuoteBtn.hidden = true;
+    dictateNoteBtn.hidden = true;
+  }
+  dictateQuoteBtn.addEventListener('click', () => toggleDictation($('#form-quote').text, dictateQuoteBtn));
+  dictateNoteBtn.addEventListener('click', () => toggleDictation($('#form-note').text, dictateNoteBtn));
+  $('#btn-scan-quote').addEventListener('click', () => $('#ocr-file').click());
+  $('#ocr-file').addEventListener('change', (e) => {
+    const file = e.target.files[0];
+    e.target.value = '';
+    if (file) runOCR(file);
+  });
+  $('#ocr-lines').addEventListener('click', (e) => {
+    const line = e.target.closest('.ocr-line');
+    if (line) line.classList.toggle('on');
+  });
+  $('#ocr-insert').addEventListener('click', insertOcrSelection);
+  $('#ocr-cancel').addEventListener('click', closeOcrPanel);
 
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') closeSheet();
