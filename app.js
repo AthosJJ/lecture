@@ -72,7 +72,9 @@ function toast(msg) {
   el.textContent = msg;
   el.classList.add('show');
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => el.classList.remove('show'), 2200);
+  // Les messages longs restent affichés plus longtemps.
+  const duration = Math.min(6000, Math.max(2200, msg.length * 55));
+  toastTimer = setTimeout(() => el.classList.remove('show'), duration);
 }
 
 /* ——— Routage par hash (le geste retour iOS fonctionne) ——— */
@@ -678,52 +680,131 @@ async function forceUpdate() {
   }
 }
 
-/* ═══════════ DICTÉE (Web Speech API) ═══════════ */
+/* ═══════════ DICTÉE (Web Speech API) ═══════════
+   Limitation Apple : l'API SpeechRecognition est bloquée dans les web
+   apps installées sur l'écran d'accueil iOS (erreur service-not-allowed,
+   bug WebKit #225298). Dans ce cas on bascule sur la dictée Apple du
+   clavier iOS : même moteur, sur l'appareil, et elle marche hors ligne. */
 
-let recog = null;
-let recogBtn = null;
+const IS_IOS = /iP(hone|ad|od)/.test(navigator.userAgent)
+  || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+const IS_STANDALONE = navigator.standalone === true
+  || window.matchMedia('(display-mode: standalone)').matches;
+
+const dict = { active: false, rec: null, btn: null, ta: null, base: '', startedAt: 0, gotResult: false, failedHard: false };
 
 function speechSupported() {
   return Boolean(window.SpeechRecognition || window.webkitSpeechRecognition);
 }
 
-function stopDictation() {
-  if (recog) { try { recog.stop(); } catch { /* déjà arrêtée */ } }
+function speechAvailable() {
+  return speechSupported()
+    && !(IS_IOS && IS_STANDALONE)
+    && localStorage.getItem('speech-blocked') !== '1';
 }
 
-function toggleDictation(textarea, btn) {
-  if (recog) { stopDictation(); return; }
+function keyboardDictationFallback(textarea) {
+  textarea.focus();
+  toast(IS_IOS
+    ? 'Touchez le micro 🎤 du clavier : c’est la dictée Apple, elle marche même hors ligne.'
+    : 'Dictée indisponible sur ce navigateur — utilisez le clavier.');
+}
+
+/* Safari échoue silencieusement si la permission micro n'a jamais été accordée. */
+async function ensureMicPermission() {
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) return true;
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    stream.getTracks().forEach((t) => t.stop());
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function dictationSession() {
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
   const r = new SR();
   r.lang = 'fr-FR';
-  r.continuous = true;
+  // continuous est instable sur iOS : sessions courtes relancées en boucle.
+  r.continuous = !IS_IOS;
   r.interimResults = true;
-  const base = textarea.value.trim();
+  r.onstart = () => { dict.startedAt = Date.now(); };
   r.onresult = (e) => {
+    dict.gotResult = true;
     let transcript = '';
     for (const res of e.results) transcript += res[0].transcript;
-    textarea.value = (base ? base + ' ' : '') + transcript.trim();
+    dict.ta.value = (dict.base ? dict.base + ' ' : '') + transcript.trim();
   };
   r.onerror = (e) => {
-    if (e.error === 'not-allowed' || e.error === 'service-not-allowed') {
-      toast('Micro refusé — autorisez la dictée, ou utilisez le micro du clavier.');
-    } else if (e.error !== 'aborted' && e.error !== 'no-speech') {
-      toast('Dictée interrompue');
+    if (e.error === 'not-allowed' || e.error === 'service-not-allowed' || e.error === 'audio-capture') {
+      dict.failedHard = true;
     }
   };
   r.onend = () => {
-    if (recogBtn) {
-      recogBtn.classList.remove('rec');
-      recogBtn.querySelector('.cap-label').textContent = 'Dicter';
+    if (!dict.active) { finishDictation(); return; }
+    const diedInstantly = !dict.gotResult && Date.now() - dict.startedAt < 1200;
+    if (dict.failedHard || diedInstantly) {
+      // Service réellement indisponible : on s'en souvient et on bascule.
+      if (dict.failedHard) localStorage.setItem('speech-blocked', '1');
+      const ta = dict.ta;
+      finishDictation();
+      keyboardDictationFallback(ta);
+      return;
     }
-    recog = null;
-    recogBtn = null;
+    // iOS coupe la session après un silence : on mémorise et on repart.
+    dict.base = dict.ta.value.trim();
+    dict.gotResult = false;
+    dict.rec = dictationSession();
+    try { dict.rec.start(); } catch { finishDictation(); }
   };
-  recog = r;
-  recogBtn = btn;
+  return r;
+}
+
+function finishDictation() {
+  if (dict.btn) {
+    dict.btn.classList.remove('rec');
+    dict.btn.querySelector('.cap-label').textContent = 'Dicter';
+  }
+  dict.active = false;
+  dict.rec = null;
+  dict.btn = null;
+  dict.ta = null;
+}
+
+function stopDictation() {
+  if (!dict.active) return;
+  dict.active = false;
+  if (dict.rec) { try { dict.rec.stop(); } catch { finishDictation(); } }
+  else finishDictation();
+}
+
+async function toggleDictation(textarea, btn) {
+  if (dict.active) { stopDictation(); return; }
+  if (!speechAvailable()) { keyboardDictationFallback(textarea); return; }
+
   btn.classList.add('rec');
   btn.querySelector('.cap-label').textContent = 'Arrêter';
-  r.start();
+  if (!(await ensureMicPermission())) {
+    btn.classList.remove('rec');
+    btn.querySelector('.cap-label').textContent = 'Dicter';
+    toast('Accès au micro refusé — autorisez-le dans les réglages.');
+    return;
+  }
+
+  dict.active = true;
+  dict.btn = btn;
+  dict.ta = textarea;
+  dict.base = textarea.value.trim();
+  dict.gotResult = false;
+  dict.failedHard = false;
+  dict.rec = dictationSession();
+  try {
+    dict.rec.start();
+  } catch {
+    finishDictation();
+    keyboardDictationFallback(textarea);
+  }
 }
 
 /* ═══════════ SCAN DE TEXTE (OCR Tesseract.js, 100 % local) ═══════════ */
@@ -937,7 +1018,8 @@ function bindEvents() {
   // Dictée & scan
   const dictateQuoteBtn = $('#btn-dictate-quote');
   const dictateNoteBtn = $('#btn-dictate-note');
-  if (!speechSupported()) {
+  // Sur iOS le bouton reste utile même sans Web Speech (bascule clavier).
+  if (!speechSupported() && !IS_IOS) {
     dictateQuoteBtn.hidden = true;
     dictateNoteBtn.hidden = true;
   }

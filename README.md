@@ -7,7 +7,7 @@ PWA installable de suivi de lecture : livres et articles, notes, citations avec 
 - **Bibliothèque** classée par statut (en cours / à lire / terminé) avec barre de progression, recherche globale (titres, auteurs, notes **et** citations) et filtre par tag.
 - **Fiche livre** : onglets Notes / Citations, mise à jour rapide de la page courante (−, +, +10), note sur 5 étoiles, dates de début/fin, tags, type livre ou article.
 - **Citations** : chacune avec son numéro de page et ses tags ; vue « toutes mes citations » filtrable par livre ou par tag, affichée en serif élégant.
-- **Dictée vocale** : bouton micro dans les formulaires de citation et de note (Web Speech API, reconnaissance en français). Sur iPhone, le micro du clavier iOS fonctionne aussi dans tous les champs.
+- **Dictée vocale** : bouton micro dans les formulaires de citation et de note (Web Speech API, reconnaissance en français). Apple bloque cette API dans les web apps installées sur l'écran d'accueil ([bug WebKit #225298](https://bugs.webkit.org/show_bug.cgi?id=225298)) : dans ce cas le bouton bascule automatiquement sur la dictée Apple du clavier iOS (même moteur, sur l'appareil, fonctionne hors ligne).
 - **Scan de texte (OCR)** : photographiez une page, le texte est reconnu **sur l'appareil** (Tesseract.js embarqué, modèle français — aucune donnée n'est envoyée sur un serveur, fonctionne hors ligne). Les lignes reconnues sont sélectionnables une à une avant insertion dans la citation.
 - **Statistiques** : compteurs par statut, pages lues, livres terminés par année, note moyenne.
 - **Exports** : notes & citations en Markdown (bibliothèque entière ou fiche seule), sauvegarde/restauration complète en JSON. Sur iPhone, l'export passe par la feuille de partage native.
