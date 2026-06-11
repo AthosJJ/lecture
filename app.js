@@ -1,5 +1,8 @@
 import * as db from './db.js';
 
+/* Synchroniser avec VERSION dans sw.js à chaque mise à jour. */
+const APP_VERSION = '5';
+
 /* ——— État en mémoire (rechargé depuis IndexedDB au démarrage) ——— */
 const state = {
   books: [],
@@ -697,16 +700,18 @@ function speechSupported() {
   return Boolean(window.SpeechRecognition || window.webkitSpeechRecognition);
 }
 
+let speechFailedThisSession = false;
+
 function speechAvailable() {
   return speechSupported()
     && !(IS_IOS && IS_STANDALONE)
-    && localStorage.getItem('speech-blocked') !== '1';
+    && !speechFailedThisSession;
 }
 
 function keyboardDictationFallback(textarea) {
   textarea.focus();
   toast(IS_IOS
-    ? 'Touchez le micro 🎤 du clavier : c’est la dictée Apple, elle marche même hors ligne.'
+    ? 'Touchez le micro 🎤 du clavier. Pas de micro ? Réglages → Général → Clavier → Activer la dictée.'
     : 'Dictée indisponible sur ce navigateur — utilisez le clavier.');
 }
 
@@ -745,8 +750,9 @@ function dictationSession() {
     if (!dict.active) { finishDictation(); return; }
     const diedInstantly = !dict.gotResult && Date.now() - dict.startedAt < 1200;
     if (dict.failedHard || diedInstantly) {
-      // Service réellement indisponible : on s'en souvient et on bascule.
-      if (dict.failedHard) localStorage.setItem('speech-blocked', '1');
+      // Service indisponible (souvent : dictée désactivée dans les
+      // réglages iOS). On bascule pour cette session seulement.
+      if (dict.failedHard) speechFailedThisSession = true;
       const ta = dict.ta;
       finishDictation();
       keyboardDictationFallback(ta);
@@ -1058,13 +1064,31 @@ async function init() {
   await loadState();
   bindEvents();
   router();
+  $('#version-line').textContent = 'Lecture — version ' + APP_VERSION;
 
   // Demande au navigateur de ne pas purger le stockage local.
   if (navigator.storage && navigator.storage.persist) {
     navigator.storage.persist().catch(() => {});
   }
+
   if ('serviceWorker' in navigator) {
-    navigator.serviceWorker.register('./sw.js').catch(() => {});
+    // updateViaCache:'none' : sw.js toujours revérifié sur le réseau.
+    navigator.serviceWorker.register('./sw.js', { updateViaCache: 'none' })
+      .then((reg) => {
+        reg.update().catch(() => {});
+        // Revérifie à chaque retour au premier plan (lancement d'app iOS).
+        document.addEventListener('visibilitychange', () => {
+          if (document.visibilityState === 'visible') reg.update().catch(() => {});
+        });
+      })
+      .catch(() => {});
+    // Recharge automatiquement quand une nouvelle version prend le contrôle
+    // (sauf à la toute première installation).
+    let hadController = Boolean(navigator.serviceWorker.controller);
+    navigator.serviceWorker.addEventListener('controllerchange', () => {
+      if (hadController) location.reload();
+      hadController = true;
+    });
   }
 }
 
