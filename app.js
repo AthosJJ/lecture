@@ -1,7 +1,7 @@
 import * as db from './db.js';
 
 /* Synchroniser avec VERSION dans sw.js à chaque mise à jour. */
-const APP_VERSION = '6';
+const APP_VERSION = '7';
 
 /* ——— État en mémoire (rechargé depuis IndexedDB au démarrage) ——— */
 const state = {
@@ -867,9 +867,10 @@ async function getOcrWorker() {
   return ocrWorker;
 }
 
-/* Prépare la photo pour l'OCR : redimensionnement vers ~2400 px,
-   niveaux de gris et étirement du contraste (photos sombres, pages
-   jaunies). C'est ce qui fait la différence sur une photo de téléphone. */
+/* Prépare la photo pour l'OCR : redimensionnement vers ~2400 px puis
+   binarisation adaptative locale (seuil calculé zone par zone via image
+   intégrale). C'est la technique standard pour les documents photographiés :
+   elle neutralise les ombres de reliure, l'éclairage de côté et le fond. */
 async function prepareImageForOCR(file) {
   const url = URL.createObjectURL(file);
   try {
@@ -881,33 +882,63 @@ async function prepareImageForOCR(file) {
     // Réduit les grandes photos, agrandit légèrement les petites images.
     const scale = Math.min(1.5, TARGET / longest);
     const canvas = document.createElement('canvas');
-    canvas.width = Math.round(img.naturalWidth * scale);
-    canvas.height = Math.round(img.naturalHeight * scale);
+    const w = Math.round(img.naturalWidth * scale);
+    const h = Math.round(img.naturalHeight * scale);
+    canvas.width = w;
+    canvas.height = h;
     const ctx = canvas.getContext('2d');
-    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+    ctx.drawImage(img, 0, 0, w, h);
 
-    const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    const imgData = ctx.getImageData(0, 0, w, h);
     const px = imgData.data;
 
-    // Histogramme de luminance, bornes aux 2e et 98e centiles
-    const hist = new Uint32Array(256);
-    for (let i = 0; i < px.length; i += 4) {
-      hist[(px[i] * 299 + px[i + 1] * 587 + px[i + 2] * 114) / 1000 | 0]++;
+    // Luminance + léger flou 3×3 séparable (réduit le bruit de capteur)
+    const gray = new Uint8ClampedArray(w * h);
+    for (let i = 0, j = 0; j < gray.length; i += 4, j++) {
+      gray[j] = (px[i] * 299 + px[i + 1] * 587 + px[i + 2] * 114) / 1000;
     }
-    const total = px.length / 4;
-    let lo = 0, hi = 255, acc = 0;
-    for (let v = 0; v < 256; v++) { acc += hist[v]; if (acc >= total * 0.02) { lo = v; break; } }
-    acc = 0;
-    for (let v = 255; v >= 0; v--) { acc += hist[v]; if (acc >= total * 0.02) { hi = v; break; } }
-    const range = Math.max(1, hi - lo);
+    const tmp = new Uint8ClampedArray(w * h);
+    for (let y = 0; y < h; y++) {
+      const row = y * w;
+      for (let x = 0; x < w; x++) {
+        const a = gray[row + Math.max(0, x - 1)], b = gray[row + x], c = gray[row + Math.min(w - 1, x + 1)];
+        tmp[row + x] = (a + b + c) / 3;
+      }
+    }
+    for (let y = 0; y < h; y++) {
+      const up = Math.max(0, y - 1) * w, mid = y * w, dn = Math.min(h - 1, y + 1) * w;
+      for (let x = 0; x < w; x++) {
+        gray[mid + x] = (tmp[up + x] + tmp[mid + x] + tmp[dn + x]) / 3;
+      }
+    }
 
-    for (let i = 0; i < px.length; i += 4) {
-      const y = (px[i] * 299 + px[i + 1] * 587 + px[i + 2] * 114) / 1000;
-      const v = Math.max(0, Math.min(255, Math.round(((y - lo) * 255) / range)));
-      px[i] = px[i + 1] = px[i + 2] = v;
+    // Image intégrale pour obtenir la moyenne locale en O(1)
+    const integ = new Float64Array((w + 1) * (h + 1));
+    for (let y = 0; y < h; y++) {
+      let rowSum = 0;
+      for (let x = 0; x < w; x++) {
+        rowSum += gray[y * w + x];
+        integ[(y + 1) * (w + 1) + (x + 1)] = integ[y * (w + 1) + (x + 1)] + rowSum;
+      }
+    }
+
+    // Seuil adaptatif : noir si nettement plus sombre que son voisinage
+    const r = Math.max(12, Math.round(longest * scale / 60));
+    const K = 0.82;
+    for (let y = 0; y < h; y++) {
+      const y0 = Math.max(0, y - r), y1 = Math.min(h - 1, y + r);
+      for (let x = 0; x < w; x++) {
+        const x0 = Math.max(0, x - r), x1 = Math.min(w - 1, x + r);
+        const area = (y1 - y0 + 1) * (x1 - x0 + 1);
+        const sum = integ[(y1 + 1) * (w + 1) + (x1 + 1)] - integ[y0 * (w + 1) + (x1 + 1)]
+          - integ[(y1 + 1) * (w + 1) + x0] + integ[y0 * (w + 1) + x0];
+        const v = gray[y * w + x] < (sum / area) * K ? 0 : 255;
+        const o = (y * w + x) * 4;
+        px[o] = px[o + 1] = px[o + 2] = v;
+      }
     }
     ctx.putImageData(imgData, 0, 0);
-    return await new Promise((res) => canvas.toBlob(res, 'image/jpeg', 0.95));
+    return await new Promise((res) => canvas.toBlob(res, 'image/png'));
   } finally {
     URL.revokeObjectURL(url);
   }
@@ -944,8 +975,13 @@ async function runOCR(file) {
     } else {
       ocrStatus('Touchez une ligne pour l’inclure ou l’exclure, puis insérez.');
     }
+    // Les débris (bords de page, taches) sont désélectionnés d'office.
+    const looksJunk = (l) => {
+      const letters = (l.match(/\p{L}/gu) || []).length;
+      return l.length < 4 || letters / l.length < 0.5;
+    };
     $('#ocr-lines').innerHTML = lines.map((l) =>
-      `<button type="button" class="ocr-line on">${esc(l)}</button>`).join('');
+      `<button type="button" class="ocr-line${looksJunk(l) ? '' : ' on'}">${esc(l)}</button>`).join('');
     $('#ocr-actions').hidden = false;
   } catch {
     ocrStatus('Échec de la reconnaissance. Réessayez avec une photo plus nette.');
