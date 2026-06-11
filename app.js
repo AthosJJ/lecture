@@ -1,7 +1,7 @@
 import * as db from './db.js';
 
 /* Synchroniser avec VERSION dans sw.js à chaque mise à jour. */
-const APP_VERSION = '5';
+const APP_VERSION = '6';
 
 /* ——— État en mémoire (rechargé depuis IndexedDB au démarrage) ——— */
 const state = {
@@ -823,6 +823,9 @@ function closeOcrPanel() {
   $('#ocr-panel').hidden = true;
   $('#ocr-lines').innerHTML = '';
   $('#ocr-actions').hidden = true;
+  $('#ocr-photo').hidden = true;
+  $('#ocr-photo').removeAttribute('src');
+  if (ocrPhotoURL) { URL.revokeObjectURL(ocrPhotoURL); ocrPhotoURL = null; }
 }
 
 function loadScript(src) {
@@ -857,44 +860,90 @@ async function getOcrWorker() {
       }
     }
   });
+  await ocrWorker.setParameters({
+    tessedit_pageseg_mode: '6', // un seul bloc de texte : le cas d'une citation
+    user_defined_dpi: '300'
+  });
   return ocrWorker;
 }
 
-/* Réduit la photo avant l'OCR : plus rapide, et largement suffisant. */
-async function downscaleImage(file, max = 1600) {
+/* Prépare la photo pour l'OCR : redimensionnement vers ~2400 px,
+   niveaux de gris et étirement du contraste (photos sombres, pages
+   jaunies). C'est ce qui fait la différence sur une photo de téléphone. */
+async function prepareImageForOCR(file) {
   const url = URL.createObjectURL(file);
   try {
     const img = new Image();
     img.src = url;
     await img.decode();
-    const scale = Math.min(1, max / Math.max(img.naturalWidth, img.naturalHeight));
-    if (scale === 1) return file;
+    const TARGET = 2400;
+    const longest = Math.max(img.naturalWidth, img.naturalHeight);
+    // Réduit les grandes photos, agrandit légèrement les petites images.
+    const scale = Math.min(1.5, TARGET / longest);
     const canvas = document.createElement('canvas');
     canvas.width = Math.round(img.naturalWidth * scale);
     canvas.height = Math.round(img.naturalHeight * scale);
-    canvas.getContext('2d').drawImage(img, 0, 0, canvas.width, canvas.height);
-    return await new Promise((res) => canvas.toBlob(res, 'image/jpeg', 0.92));
+    const ctx = canvas.getContext('2d');
+    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+
+    const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    const px = imgData.data;
+
+    // Histogramme de luminance, bornes aux 2e et 98e centiles
+    const hist = new Uint32Array(256);
+    for (let i = 0; i < px.length; i += 4) {
+      hist[(px[i] * 299 + px[i + 1] * 587 + px[i + 2] * 114) / 1000 | 0]++;
+    }
+    const total = px.length / 4;
+    let lo = 0, hi = 255, acc = 0;
+    for (let v = 0; v < 256; v++) { acc += hist[v]; if (acc >= total * 0.02) { lo = v; break; } }
+    acc = 0;
+    for (let v = 255; v >= 0; v--) { acc += hist[v]; if (acc >= total * 0.02) { hi = v; break; } }
+    const range = Math.max(1, hi - lo);
+
+    for (let i = 0; i < px.length; i += 4) {
+      const y = (px[i] * 299 + px[i + 1] * 587 + px[i + 2] * 114) / 1000;
+      const v = Math.max(0, Math.min(255, Math.round(((y - lo) * 255) / range)));
+      px[i] = px[i + 1] = px[i + 2] = v;
+    }
+    ctx.putImageData(imgData, 0, 0);
+    return await new Promise((res) => canvas.toBlob(res, 'image/jpeg', 0.95));
   } finally {
     URL.revokeObjectURL(url);
   }
 }
 
+let ocrPhotoURL = null;
+
 async function runOCR(file) {
   $('#ocr-panel').hidden = false;
   $('#ocr-lines').innerHTML = '';
   $('#ocr-actions').hidden = true;
+
+  // Aperçu de la photo (sur iOS, Live Text permet d'y sélectionner
+  // le texte directement avec un appui long : second filet de secours).
+  if (ocrPhotoURL) URL.revokeObjectURL(ocrPhotoURL);
+  ocrPhotoURL = URL.createObjectURL(file);
+  $('#ocr-photo').src = ocrPhotoURL;
+  $('#ocr-photo').hidden = false;
+
   ocrStatus('Préparation de la photo…');
   try {
-    const image = await downscaleImage(file);
+    const image = await prepareImageForOCR(file);
     const worker = await getOcrWorker();
     ocrStatus('Reconnaissance…');
     const { data } = await worker.recognize(image);
     const lines = data.text.split('\n').map((l) => l.trim()).filter(Boolean);
     if (!lines.length) {
-      ocrStatus('Aucun texte reconnu. Réessayez avec une photo nette et bien éclairée.');
+      ocrStatus('Aucun texte reconnu. Cadrez le passage seul, de près, bien à plat et avec de la lumière.');
       return;
     }
-    ocrStatus('Touchez une ligne pour l’inclure ou l’exclure, puis insérez.');
+    if (data.confidence && data.confidence < 60) {
+      ocrStatus('Reconnaissance incertaine — pour un meilleur résultat, cadrez le passage seul, de près, à plat et bien éclairé.'
+        + (IS_IOS ? ' Vous pouvez aussi sélectionner le texte directement sur la photo (appui long).' : ''));
+    } else {
+      ocrStatus('Touchez une ligne pour l’inclure ou l’exclure, puis insérez.');
+    }
     $('#ocr-lines').innerHTML = lines.map((l) =>
       `<button type="button" class="ocr-line on">${esc(l)}</button>`).join('');
     $('#ocr-actions').hidden = false;

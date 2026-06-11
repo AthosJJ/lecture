@@ -547,6 +547,17 @@ input, select, textarea { font: inherit; color: inherit; }
   animation: viewIn .3s var(--ease) both;
 }
 .ocr-status { font-size: 13px; color: var(--muted); margin-bottom: 8px; font-variant-numeric: tabular-nums; }
+.ocr-photo {
+  display: block;
+  width: 100%;
+  max-height: 200px;
+  object-fit: contain;
+  border-radius: 10px;
+  background: var(--card);
+  margin-bottom: 10px;
+  -webkit-user-select: auto;
+  user-select: auto;
+}
 .ocr-lines {
   display: flex; flex-direction: column; gap: 6px;
   max-height: 240px; overflow-y: auto;
