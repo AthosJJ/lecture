@@ -1,7 +1,7 @@
 import * as db from './db.js';
 
 /* Synchroniser avec VERSION dans sw.js à chaque mise à jour. */
-const APP_VERSION = '7';
+const APP_VERSION = '8';
 
 /* ——— État en mémoire (rechargé depuis IndexedDB au démarrage) ——— */
 const state = {
@@ -15,12 +15,27 @@ const state = {
   libraryTag: null,
   quotesBook: '',
   quotesTag: null,
+  quotesQuery: '',
   editing: { bookId: null, noteId: null, quoteId: null },
   form: { type: 'book', status: 'toread', rating: 0 }
 };
 
 const STATUS_LABELS = { toread: 'À lire', reading: 'En cours', done: 'Terminé' };
 const STATUS_ORDER = ['reading', 'toread', 'done'];
+const TYPE_LABELS = { book: 'Livre', article: 'Article', podcast: 'Podcast' };
+
+/* Sous-titre d'une carte : auteur, ou « Émission — auteur » pour un podcast. */
+function subtitleOf(book) {
+  return book.type === 'podcast'
+    ? [book.show, book.author].filter(Boolean).join(' — ')
+    : (book.author || '');
+}
+
+/* Position d'une citation : « p. 42 » ou « à 42 min » pour un podcast. */
+function quotePlace(qt, book) {
+  if (qt.page == null || qt.page === '') return null;
+  return book && book.type === 'podcast' ? `à ${qt.page} min` : `p. ${qt.page}`;
+}
 
 const $ = (sel) => document.querySelector(sel);
 const $$ = (sel) => [...document.querySelectorAll(sel)];
@@ -115,20 +130,21 @@ function render() {
 
 function bookCard(book, i, matchBadge) {
   const p = pct(book);
-  const hue = hueFromString(book.title);
+  const hue = hueFromString(book.type === 'podcast' && book.show ? book.show : book.title);
+  const sub = subtitleOf(book);
   return `
   <article class="card book-card" data-id="${book.id}" style="animation-delay:${Math.min(i * 35, 350)}ms">
-    <div class="cover ${book.type === 'article' ? 'article' : ''}" style="--h:${hue}"><span>${esc(initials(book.title))}</span></div>
+    <div class="cover ${book.type === 'article' ? 'article' : ''}${book.type === 'podcast' ? ' podcast' : ''}" style="--h:${hue}"><span>${esc(initials(book.type === 'podcast' && book.show ? book.show : book.title))}</span></div>
     <div class="book-info">
       <h3>${esc(book.title)}</h3>
-      ${book.author ? `<p class="author">${esc(book.author)}</p>` : ''}
+      ${sub ? `<p class="author">${esc(sub)}</p>` : ''}
       ${p !== null && book.status !== 'toread' ? `
       <div class="progress-row">
         <div class="progress"><i style="width:${p}%"></i></div>
         <span class="progress-label">${book.currentPage || 0}/${book.totalPages}</span>
       </div>` : ''}
       <div class="badges">
-        ${book.type === 'article' ? '<span class="badge">Article</span>' : ''}
+        ${book.type && book.type !== 'book' ? `<span class="badge">${TYPE_LABELS[book.type] || ''}</span>` : ''}
         ${book.status === 'done' && book.rating ? `<span class="rating-inline">${stars(book.rating)}</span>` : ''}
         ${matchBadge ? `<span class="badge match">${matchBadge}</span>` : ''}
       </div>
@@ -142,6 +158,7 @@ function renderLibrary() {
 
   // Puces de tags (tags des livres)
   const allTags = [...new Set(state.books.flatMap((b) => b.tags || []))].sort();
+  if (state.libraryTag && !allTags.includes(state.libraryTag)) state.libraryTag = null;
   const chipsEl = $('#library-tags');
   chipsEl.hidden = allTags.length === 0;
   chipsEl.innerHTML = allTags.map((t) =>
@@ -163,7 +180,7 @@ function renderLibrary() {
   if (q) {
     const results = [];
     for (const b of books) {
-      const inBook = (b.title + ' ' + (b.author || '') + ' ' + (b.tags || []).join(' ')).toLowerCase().includes(q);
+      const inBook = (b.title + ' ' + (b.author || '') + ' ' + (b.show || '') + ' ' + (b.tags || []).join(' ')).toLowerCase().includes(q);
       const inNote = notesOf(b.id).some((n) => n.text.toLowerCase().includes(q));
       const inQuote = quotesOf(b.id).some((qt) => qt.text.toLowerCase().includes(q));
       if (inBook || inNote || inQuote) {
@@ -196,7 +213,7 @@ function quoteCard(qt, i, withSource = true) {
     <span class="qmark">“</span>
     <p class="qtext">${esc(qt.text)}</p>
     <footer class="entry-foot">
-      <span>${withSource && book ? `<span class="qsource">${esc(book.title)}</span> · ` : ''}${qt.page != null && qt.page !== '' ? `p.&nbsp;${esc(qt.page)}` : 'page non précisée'}</span>
+      <span>${withSource && book ? `<span class="qsource">${esc(book.title)}</span> · ` : ''}${esc(quotePlace(qt, book) || (book && book.type === 'podcast' ? 'minutage non précisé' : 'page non précisée'))}</span>
       ${(qt.tags || []).length ? `<span class="tagline">${qt.tags.map((t) => `<span class="minitag">#${esc(t)}</span>`).join('')}</span>` : ''}
       <span class="spacer"></span>
       ${withSource ? '' : `<button class="q-edit" data-id="${qt.id}">Modifier</button><button class="del q-del" data-id="${qt.id}">Suppr.</button>`}
@@ -213,11 +230,24 @@ function renderQuotesView() {
     .map((b) => `<option value="${b.id}" ${state.quotesBook === b.id ? 'selected' : ''}>${esc(b.title)}</option>`);
   sel.innerHTML = `<option value="">Tous les livres</option>` + options.join('');
 
-  // Filtre par tag
+  // Filtres : livre, recherche plein texte, puis tag
   let quotes = state.quotes.slice().sort((a, b) => b.createdAt.localeCompare(a.createdAt));
   if (state.quotesBook) quotes = quotes.filter((q) => q.bookId === state.quotesBook);
 
+  const qq = state.quotesQuery.trim().toLowerCase();
+  if (qq) {
+    quotes = quotes.filter((q) => {
+      const book = bookById(q.bookId);
+      return q.text.toLowerCase().includes(qq)
+        || (q.tags || []).some((t) => t.includes(qq))
+        || (book && (book.title + ' ' + (book.show || '')).toLowerCase().includes(qq));
+    });
+  }
+
   const tags = [...new Set(quotes.flatMap((q) => q.tags || []))].sort();
+  // Un tag actif qui n'existe plus dans la sélection courante est levé,
+  // sinon il filtrerait tout en silence (les puces étant cachées).
+  if (state.quotesTag && !tags.includes(state.quotesTag)) state.quotesTag = null;
   const chipsEl = $('#quotes-tags');
   chipsEl.hidden = tags.length === 0;
   chipsEl.innerHTML = tags.map((t) =>
@@ -245,11 +275,12 @@ function renderBook() {
   if (book.startDate) dates.push('début : ' + fmtDate(book.startDate));
   if (book.endDate) dates.push('fin : ' + fmtDate(book.endDate));
 
+  const sub = subtitleOf(book);
   $('#book-content').innerHTML = `
     <div class="book-hero">
-      <p class="kicker">${book.type === 'article' ? 'Article' : 'Livre'}${book.createdAt ? ' · ajouté le ' + fmtDate(book.createdAt) : ''}</p>
+      <p class="kicker">${TYPE_LABELS[book.type] || 'Livre'}${book.createdAt ? ' · ajouté le ' + fmtDate(book.createdAt) : ''}</p>
       <h2>${esc(book.title)}</h2>
-      ${book.author ? `<p class="author">${esc(book.author)}</p>` : ''}
+      ${sub ? `<p class="author">${esc(sub)}</p>` : ''}
       <div class="meta">
         <span class="pill status-${book.status}">${STATUS_LABELS[book.status]}</span>
         ${dates.map((d) => `<span class="pill">${esc(d)}</span>`).join('')}
@@ -259,7 +290,7 @@ function renderBook() {
     </div>
     ${book.totalPages ? `
     <div class="card progress-card">
-      <div class="head"><b>Progression</b><span>p. ${book.currentPage || 0} / ${book.totalPages} · ${p}%</span></div>
+      <div class="head"><b>Progression</b><span>${book.type === 'podcast' ? `${book.currentPage || 0} / ${book.totalPages} min` : `p. ${book.currentPage || 0} / ${book.totalPages}`} · ${p}%</span></div>
       <div class="progress"><i style="width:${p}%"></i></div>
       <div class="stepper">
         <button id="pg-minus" aria-label="Reculer d'une page">−</button>
@@ -314,7 +345,9 @@ function bindProgressStepper(book) {
       if (!book.startDate) book.startDate = todayISO();
     }
     if (v >= book.totalPages && book.status !== 'done'
-        && confirm('Vous avez atteint la dernière page. Marquer comme terminé ?')) {
+        && confirm(book.type === 'podcast'
+          ? 'Épisode écouté en entier. Marquer comme terminé ?'
+          : 'Vous avez atteint la dernière page. Marquer comme terminé ?')) {
       book.status = 'done';
       if (!book.endDate) book.endDate = todayISO();
     }
@@ -334,6 +367,14 @@ function renderStats() {
   for (const b of state.books) counts[b.status] = (counts[b.status] || 0) + 1;
 
   const pagesRead = state.books.reduce((sum, b) => {
+    if (b.type === 'podcast') return sum;
+    if (b.status === 'done') return sum + (b.totalPages || 0);
+    if (b.status === 'reading') return sum + (b.currentPage || 0);
+    return sum;
+  }, 0);
+
+  const minutesHeard = state.books.reduce((sum, b) => {
+    if (b.type !== 'podcast') return sum;
     if (b.status === 'done') return sum + (b.totalPages || 0);
     if (b.status === 'reading') return sum + (b.currentPage || 0);
     return sum;
@@ -361,6 +402,7 @@ function renderStats() {
     <div class="card stat-wide">
       <div class="kpis">
         <div><b>${pagesRead.toLocaleString('fr-FR')}</b><span>pages lues</span></div>
+        ${minutesHeard ? `<div><b>${minutesHeard.toLocaleString('fr-FR')}</b><span>min écoutées</span></div>` : ''}
         <div><b>${state.quotes.length}</b><span>citations</span></div>
         <div><b>${state.notes.length}</b><span>notes</span></div>
         <div><b>${avg ? avg + ' ★' : '—'}</b><span>note moyenne</span></div>
@@ -423,9 +465,9 @@ function openBookForm(book = null) {
   state.form.status = book ? book.status : 'toread';
   state.form.rating = book ? (book.rating || 0) : 0;
 
-  $('#sheet-book-title').textContent = book ? 'Modifier' : (state.form.type === 'article' ? 'Nouvel article' : 'Nouveau livre');
   form.title.value = book ? book.title : '';
   form.author.value = book ? (book.author || '') : '';
+  form.show.value = book ? (book.show || '') : '';
   form.currentPage.value = book && book.currentPage != null ? book.currentPage : '';
   form.totalPages.value = book && book.totalPages ? book.totalPages : '';
   form.startDate.value = book ? (book.startDate || '') : '';
@@ -436,7 +478,25 @@ function openBookForm(book = null) {
   setSegmented('field-type', state.form.type);
   setSegmented('field-status', state.form.status);
   syncRatingUI();
+  syncTypeUI();
   openSheet('#sheet-book');
+}
+
+/* Adapte le formulaire au type : champ Émission et unités pour un podcast. */
+function syncTypeUI() {
+  const t = state.form.type;
+  const pod = t === 'podcast';
+  $('#field-show').hidden = !pod;
+  $('#label-title').textContent = pod ? 'Titre de l’épisode *' : 'Titre *';
+  $('#label-current').textContent = pod ? 'Minute actuelle' : 'Page actuelle';
+  $('#label-total').textContent = pod ? 'Durée (min)' : 'Pages total';
+  $('#label-start').textContent = pod ? 'Début d’écoute' : 'Début de lecture';
+  $('#label-end').textContent = pod ? 'Fin d’écoute' : 'Fin de lecture';
+  if (!state.editing.bookId) {
+    $('#sheet-book-title').textContent = pod ? 'Nouveau podcast' : (t === 'article' ? 'Nouvel article' : 'Nouveau livre');
+  } else {
+    $('#sheet-book-title').textContent = 'Modifier';
+  }
 }
 
 async function saveBookForm(e) {
@@ -452,6 +512,7 @@ async function saveBookForm(e) {
   book.type = state.form.type;
   book.title = title;
   book.author = form.author.value.trim();
+  book.show = state.form.type === 'podcast' ? form.show.value.trim() : '';
   book.status = state.form.status;
   book.totalPages = Math.max(0, parseInt(form.totalPages.value, 10) || 0) || null;
   book.currentPage = Math.max(0, parseInt(form.currentPage.value, 10) || 0);
@@ -528,6 +589,8 @@ function openQuoteForm(quote = null) {
   const form = $('#form-quote');
   form.reset();
   closeOcrPanel();
+  const book = bookById(state.currentBookId);
+  $('#quote-page-label').textContent = book && book.type === 'podcast' ? 'Minute' : 'Page';
   state.editing.quoteId = quote ? quote.id : null;
   $('#sheet-quote-title').textContent = quote ? 'Modifier la citation' : 'Nouvelle citation';
   form.text.value = quote ? quote.text : '';
@@ -561,20 +624,24 @@ async function saveQuoteForm(e) {
 
 /* ═══════════ EXPORTS ═══════════ */
 
-function quoteBlock(q) {
+function quoteBlock(q, isPodcast) {
   const lines = q.text.split('\n').map((l) => '> ' + l).join('\n');
   const meta = [];
-  if (q.page != null) meta.push('p. ' + q.page);
+  if (q.page != null) meta.push(isPodcast ? `à ${q.page} min` : 'p. ' + q.page);
   if ((q.tags || []).length) meta.push(q.tags.map((t) => '#' + t).join(' '));
   return lines + (meta.length ? '\n>\n> — ' + meta.join(' · ') : '');
 }
 
 function bookMarkdown(book) {
-  const lines = [`## ${book.title}${book.author ? ' — ' + book.author : ''}`, ''];
-  const meta = [`- Type : ${book.type === 'article' ? 'Article' : 'Livre'}`, `- Statut : ${STATUS_LABELS[book.status]}`];
-  if (book.totalPages) meta.push(`- Progression : ${book.currentPage || 0}/${book.totalPages} (${pct(book)} %)`);
-  if (book.startDate) meta.push(`- Début de lecture : ${fmtDate(book.startDate)}`);
-  if (book.endDate) meta.push(`- Fin de lecture : ${fmtDate(book.endDate)}`);
+  const sub = subtitleOf(book);
+  const pod = book.type === 'podcast';
+  const act = pod ? 'écoute' : 'lecture';
+  const lines = [`## ${book.title}${sub ? ' — ' + sub : ''}`, ''];
+  const meta = [`- Type : ${TYPE_LABELS[book.type] || 'Livre'}`, `- Statut : ${STATUS_LABELS[book.status]}`];
+  if (pod && book.show) meta.push(`- Émission : ${book.show}`);
+  if (book.totalPages) meta.push(`- Progression : ${book.currentPage || 0}/${book.totalPages}${pod ? ' min' : ''} (${pct(book)} %)`);
+  if (book.startDate) meta.push(`- Début d'${act} : ${fmtDate(book.startDate)}`);
+  if (book.endDate) meta.push(`- Fin d'${act} : ${fmtDate(book.endDate)}`);
   if ((book.tags || []).length) meta.push(`- Tags : ${book.tags.join(', ')}`);
   if (book.status === 'done' && book.rating) meta.push(`- Note : ${stars(book.rating)}`);
   lines.push(...meta, '');
@@ -587,7 +654,7 @@ function bookMarkdown(book) {
   const quotes = quotesOf(book.id);
   if (quotes.length) {
     lines.push('### Citations', '');
-    for (const q of quotes) lines.push(quoteBlock(q), '');
+    for (const q of quotes) lines.push(quoteBlock(q, pod), '');
   }
   return lines.join('\n');
 }
@@ -1017,6 +1084,10 @@ function bindEvents() {
   });
 
   // Citations (vue globale)
+  $('#quotes-search').addEventListener('input', (e) => {
+    state.quotesQuery = e.target.value;
+    renderQuotesView();
+  });
   $('#quotes-book-filter').addEventListener('change', (e) => {
     state.quotesBook = e.target.value;
     state.quotesTag = null;
@@ -1086,6 +1157,7 @@ function bindEvents() {
     if (!b) return;
     state.form.type = b.dataset.value;
     setSegmented('field-type', state.form.type);
+    syncTypeUI();
   });
   $('#field-status').addEventListener('click', (e) => {
     const b = e.target.closest('.seg-btn');

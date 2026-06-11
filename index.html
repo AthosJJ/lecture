@@ -43,6 +43,10 @@
       <header class="page-head">
         <h1>Citations</h1>
       </header>
+      <div class="search-wrap">
+        <svg class="search-ico" viewBox="0 0 20 20" width="16" height="16" aria-hidden="true"><circle cx="8.5" cy="8.5" r="5.5" stroke="currentColor" stroke-width="1.8" fill="none"/><path d="M13 13l4 4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+        <input id="quotes-search" type="search" placeholder="Un mot pour retrouver une citation…" autocomplete="off">
+      </div>
       <div class="filters-row">
         <select id="quotes-book-filter" aria-label="Filtrer par livre">
           <option value="">Tous les livres</option>
@@ -117,9 +121,14 @@
         <div class="segmented small-seg" id="field-type">
           <button type="button" class="seg-btn active" data-value="book">Livre</button>
           <button type="button" class="seg-btn" data-value="article">Article</button>
+          <button type="button" class="seg-btn" data-value="podcast">Podcast</button>
         </div>
+        <label class="field" id="field-show" hidden>
+          <span>Émission</span>
+          <input name="show" type="text" autocomplete="off" placeholder="Nom du podcast">
+        </label>
         <label class="field">
-          <span>Titre *</span>
+          <span id="label-title">Titre *</span>
           <input name="title" type="text" required autocomplete="off">
         </label>
         <label class="field">
@@ -133,21 +142,21 @@
         </div>
         <div class="field-row">
           <label class="field">
-            <span>Page actuelle</span>
+            <span id="label-current">Page actuelle</span>
             <input name="currentPage" type="number" min="0" inputmode="numeric">
           </label>
           <label class="field">
-            <span>Pages total</span>
+            <span id="label-total">Pages total</span>
             <input name="totalPages" type="number" min="1" inputmode="numeric">
           </label>
         </div>
         <div class="field-row">
           <label class="field">
-            <span>Début de lecture</span>
+            <span id="label-start">Début de lecture</span>
             <input name="startDate" type="date">
           </label>
           <label class="field">
-            <span>Fin de lecture</span>
+            <span id="label-end">Fin de lecture</span>
             <input name="endDate" type="date">
           </label>
         </div>
@@ -215,7 +224,7 @@
         <input type="file" id="ocr-file" accept="image/*" hidden>
         <div class="field-row">
           <label class="field">
-            <span>Page</span>
+            <span id="quote-page-label">Page</span>
             <input name="page" type="number" min="0" inputmode="numeric">
           </label>
           <label class="field">
