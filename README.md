@@ -20,7 +20,7 @@ Tous les chemins sont relatifs : l'app fonctionne servie depuis un sous-chemin.
 1. Dans le dépôt : **Settings → Pages → Source : Deploy from a branch**, choisir la branche et le dossier `/ (root)`.
 2. Ouvrir `https://<utilisateur>.github.io/<repo>/`.
 
-Après chaque mise à jour, incrémenter `VERSION` dans `sw.js` pour invalider le cache.
+Après chaque mise à jour, incrémenter `VERSION` dans `sw.js` pour invalider le cache. Sur l'appareil, le bouton **Rechercher une mise à jour** (écran Stats → Données) force la récupération de la nouvelle version.
 
 ## Installation sur iPhone (iOS 16.4+)
 

@@ -649,6 +649,35 @@ async function importJSONFile(file) {
   }
 }
 
+/* ═══════════ MISE À JOUR FORCÉE ═══════════ */
+
+async function forceUpdate() {
+  if (!('serviceWorker' in navigator)) { location.reload(); return; }
+  toast('Recherche de mise à jour…');
+  try {
+    // Vérifie le réseau avant de toucher au cache.
+    await fetch('./sw.js', { cache: 'no-store' });
+  } catch {
+    toast('Hors ligne — réessayez plus tard');
+    return;
+  }
+  const reg = await navigator.serviceWorker.getRegistration();
+  if (!reg) { location.reload(); return; }
+
+  let reloaded = false;
+  const reload = () => { if (!reloaded) { reloaded = true; location.reload(); } };
+  // Le nouveau service worker prend le contrôle (skipWaiting + claim) : on recharge.
+  navigator.serviceWorker.addEventListener('controllerchange', reload);
+
+  await reg.update();
+  if (reg.installing || reg.waiting) {
+    toast('Mise à jour en cours…');
+    setTimeout(reload, 15000); // garde-fou si controllerchange n'arrive pas
+  } else {
+    toast('Application déjà à jour');
+  }
+}
+
 /* ═══════════ DICTÉE (Web Speech API) ═══════════ */
 
 let recog = null;
@@ -870,6 +899,7 @@ function bindEvents() {
     exportMarkdown();
   });
   $('#btn-export-json').addEventListener('click', exportJSON);
+  $('#btn-update-app').addEventListener('click', forceUpdate);
   $('#btn-import-json').addEventListener('click', () => $('#import-file').click());
   $('#import-file').addEventListener('change', (e) => {
     const file = e.target.files[0];
@@ -929,6 +959,9 @@ function bindEvents() {
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') closeSheet();
   });
+
+  // Verrouille le zoom par pincement sur iOS (Safari ignore user-scalable=no).
+  document.addEventListener('gesturestart', (e) => e.preventDefault(), { passive: false });
 }
 
 /* ═══════════ DÉMARRAGE ═══════════ */

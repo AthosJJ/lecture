@@ -42,7 +42,8 @@
   }
 }
 
-* { box-sizing: border-box; margin: 0; padding: 0; }
+/* touch-action: manipulation désactive le zoom au double-tap */
+* { box-sizing: border-box; margin: 0; padding: 0; touch-action: manipulation; }
 
 html { -webkit-text-size-adjust: 100%; }
 
