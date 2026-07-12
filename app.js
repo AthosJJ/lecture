@@ -1,7 +1,7 @@
 import * as db from './db.js';
 
 /* Synchroniser avec VERSION dans sw.js à chaque mise à jour. */
-const APP_VERSION = '8';
+const APP_VERSION = '9';
 
 /* ——— État en mémoire (rechargé depuis IndexedDB au démarrage) ——— */
 const state = {
@@ -123,7 +123,12 @@ function render() {
   if (state.route === 'quotes') { $('#view-quotes').classList.add('active'); renderQuotesView(); }
   if (state.route === 'stats') { $('#view-stats').classList.add('active'); renderStats(); }
   if (state.route === 'book') { $('#view-book').classList.add('active'); renderBook(); }
-  window.scrollTo(0, 0);
+
+  // Ne remonte en haut qu'en changeant d'écran, pas à chaque rafraîchissement
+  // (ajouter une note ne doit pas faire perdre la position de défilement).
+  const screenKey = state.route + (state.route === 'book' ? ':' + state.currentBookId : '');
+  if (render.lastScreen !== screenKey) window.scrollTo(0, 0);
+  render.lastScreen = screenKey;
 }
 
 /* ═══════════ ÉCRAN BIBLIOTHÈQUE ═══════════ */
@@ -222,9 +227,10 @@ function quoteCard(qt, i, withSource = true) {
 }
 
 function renderQuotesView() {
-  // Filtre par livre
+  // Filtre par livre (levé si le livre filtré a été supprimé)
   const sel = $('#quotes-book-filter');
   const bookIds = [...new Set(state.quotes.map((q) => q.bookId))];
+  if (state.quotesBook && !bookIds.includes(state.quotesBook)) state.quotesBook = '';
   const options = bookIds.map(bookById).filter(Boolean)
     .sort((a, b) => a.title.localeCompare(b.title, 'fr'))
     .map((b) => `<option value="${b.id}" ${state.quotesBook === b.id ? 'selected' : ''}>${esc(b.title)}</option>`);
@@ -739,7 +745,7 @@ async function forceUpdate() {
   let reloaded = false;
   const reload = () => { if (!reloaded) { reloaded = true; location.reload(); } };
   // Le nouveau service worker prend le contrôle (skipWaiting + claim) : on recharge.
-  navigator.serviceWorker.addEventListener('controllerchange', reload);
+  navigator.serviceWorker.addEventListener('controllerchange', reload, { once: true });
 
   await reg.update();
   if (reg.installing || reg.waiting) {
@@ -770,15 +776,18 @@ function speechSupported() {
 let speechFailedThisSession = false;
 
 function speechAvailable() {
+  // Sur iOS, l'API Web Speech est bloquée en app installée et instable
+  // dans Safari : on passe systématiquement par la dictée du clavier,
+  // qui utilise le même moteur Apple et fonctionne partout.
   return speechSupported()
-    && !(IS_IOS && IS_STANDALONE)
+    && !IS_IOS
     && !speechFailedThisSession;
 }
 
 function keyboardDictationFallback(textarea) {
   textarea.focus();
   toast(IS_IOS
-    ? 'Touchez le micro 🎤 du clavier. Pas de micro ? Réglages → Général → Clavier → Activer la dictée.'
+    ? 'Touchez le micro 🎤 en bas du clavier et parlez. Pas de micro ? Réglages → Général → Clavier → Activer la dictée.'
     : 'Dictée indisponible sur ce navigateur — utilisez le clavier.');
 }
 
@@ -888,11 +897,31 @@ function ocrStatus(msg) { $('#ocr-status').textContent = msg; }
 
 function closeOcrPanel() {
   $('#ocr-panel').hidden = true;
+  $('#ocr-choice').hidden = true;
+  $('#ocr-status').textContent = '';
   $('#ocr-lines').innerHTML = '';
   $('#ocr-actions').hidden = true;
   $('#ocr-photo').hidden = true;
   $('#ocr-photo').removeAttribute('src');
   if (ocrPhotoURL) { URL.revokeObjectURL(ocrPhotoURL); ocrPhotoURL = null; }
+}
+
+/* Sur iOS, la meilleure reconnaissance est celle d'Apple, intégrée au
+   clavier (« Scanner le texte ») : on la propose en premier choix. */
+function openScanChooser() {
+  if (!IS_IOS) { $('#ocr-file').click(); return; }
+  $('#ocr-panel').hidden = false;
+  $('#ocr-lines').innerHTML = '';
+  $('#ocr-actions').hidden = true;
+  $('#ocr-photo').hidden = true;
+  $('#ocr-status').textContent = '';
+  $('#ocr-choice').hidden = false;
+}
+
+function startNativeScan() {
+  $('#ocr-choice').hidden = true;
+  ocrStatus('Touchez le champ Citation, touchez-le à nouveau, puis choisissez « Scanner le texte » 📷 dans le menu. Le texte visé par la caméra s’écrit directement dans le champ.');
+  $('#form-quote').text.focus();
 }
 
 function loadScript(src) {
@@ -1015,6 +1044,7 @@ let ocrPhotoURL = null;
 
 async function runOCR(file) {
   $('#ocr-panel').hidden = false;
+  $('#ocr-choice').hidden = true;
   $('#ocr-lines').innerHTML = '';
   $('#ocr-actions').hidden = true;
 
@@ -1188,7 +1218,9 @@ function bindEvents() {
   }
   dictateQuoteBtn.addEventListener('click', () => toggleDictation($('#form-quote').text, dictateQuoteBtn));
   dictateNoteBtn.addEventListener('click', () => toggleDictation($('#form-note').text, dictateNoteBtn));
-  $('#btn-scan-quote').addEventListener('click', () => $('#ocr-file').click());
+  $('#btn-scan-quote').addEventListener('click', openScanChooser);
+  $('#scan-native').addEventListener('click', startNativeScan);
+  $('#scan-photo').addEventListener('click', () => { $('#ocr-choice').hidden = true; $('#ocr-file').click(); });
   $('#ocr-file').addEventListener('change', (e) => {
     const file = e.target.files[0];
     e.target.value = '';

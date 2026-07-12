@@ -1,6 +1,6 @@
 /* Service worker : mise en cache de l'app shell pour un fonctionnement
    hors ligne complet. Incrémenter VERSION à chaque déploiement. */
-const VERSION = 'lecture-v8';
+const VERSION = 'lecture-v9';
 const ASSETS = [
   './',
   './index.html',

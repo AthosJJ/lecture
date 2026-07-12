@@ -213,6 +213,16 @@
           </button>
         </div>
         <div class="ocr-panel" id="ocr-panel" hidden>
+          <div class="ocr-choice" id="ocr-choice" hidden>
+            <button type="button" class="choice-btn" id="scan-native">
+              <b>Avec l’appareil photo — recommandé</b>
+              <span>OCR d’Apple, écrit directement dans le champ. Qualité maximale.</span>
+            </button>
+            <button type="button" class="choice-btn" id="scan-photo">
+              <b>Depuis une photo de la galerie</b>
+              <span>Reconnaissance intégrée, lignes sélectionnables une à une.</span>
+            </button>
+          </div>
           <p class="ocr-status" id="ocr-status"></p>
           <img id="ocr-photo" class="ocr-photo" alt="Photo à reconnaître" hidden>
           <div class="ocr-lines" id="ocr-lines"></div>
