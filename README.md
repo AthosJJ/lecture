@@ -30,6 +30,26 @@ Après chaque mise à jour, incrémenter `VERSION` dans `sw.js` pour invalider l
 
 > Les données vivent dans IndexedDB sur l'appareil. iOS peut purger le stockage d'une web app longtemps inutilisée : pensez à faire une sauvegarde JSON de temps en temps (écran Stats → Données).
 
+## Application iOS native (dossier `ios/`)
+
+Le dépôt contient aussi **Lecture pour iOS**, une app native SwiftUI complète (iOS 17+) avec les mêmes écrans et données, plus les moteurs natifs d'Apple :
+
+- **Dictée** : `SFSpeechRecognizer` en français, sur l'appareil quand c'est possible ;
+- **Scanner caméra** : `DataScannerViewController` de VisionKit (le scanner de texte de l'app Notes) — visez la page, touchez le texte surligné ;
+- **OCR photo** : Vision (`VNRecognizeTextRequest`) sur les photos de la galerie, lignes sélectionnables ;
+- **Migration** : la sauvegarde JSON est au même format que la PWA — exportez depuis la PWA (Stats → Sauvegarder tout), envoyez le fichier sur l'iPhone, importez dans l'app (Stats → Restaurer).
+
+### Compiler et installer (Mac requis)
+
+1. Installer **Xcode 16 ou plus récent** (Mac App Store).
+2. Ouvrir `ios/Lecture.xcodeproj`.
+3. Cible « Lecture » → onglet **Signing & Capabilities** → choisir votre **Team** (votre identifiant Apple suffit ; Xcode crée un profil personnel).
+4. Si besoin, changer le **Bundle Identifier** (`com.athosjj.lecture`) pour un identifiant unique à vous.
+5. Brancher l'iPhone (ou le connecter en Wi-Fi), le sélectionner comme destination, puis **Run** (⌘R).
+6. Sur l'iPhone, la première fois : Réglages → Général → VPN et gestion de l'appareil → faire confiance à votre certificat de développeur.
+
+> Sans compte Apple Developer payant (99 €/an), l'app installée expire au bout de 7 jours — il suffit de relancer Run depuis Xcode pour la réinstaller. Avec un compte payant, l'app peut être signée pour un an ou distribuée via TestFlight.
+
 ## Structure
 
 ```
