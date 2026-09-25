@@ -80,6 +80,16 @@ export async function removeBookCascade(bookId) {
   await txDone(tx);
 }
 
+/* Réécrit un lot d'enregistrements en une transaction (annulation d'une suppression). */
+export async function putMany(data) {
+  const db = await open();
+  const tx = db.transaction(STORES, 'readwrite');
+  for (const store of STORES) {
+    for (const item of data[store] || []) tx.objectStore(store).put(item);
+  }
+  await txDone(tx);
+}
+
 export async function exportAll() {
   const [books, notes, quotes] = await Promise.all(STORES.map(getAll));
   return { app: 'lecture', version: 1, exportedAt: new Date().toISOString(), books, notes, quotes };

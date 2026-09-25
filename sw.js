@@ -1,6 +1,6 @@
 /* Service worker : mise en cache de l'app shell pour un fonctionnement
    hors ligne complet. Incrémenter VERSION à chaque déploiement. */
-const VERSION = 'lecture-v9';
+const VERSION = 'lecture-v10';
 const ASSETS = [
   './',
   './index.html',
@@ -17,12 +17,16 @@ const ASSETS = [
   './vendor/tesseract/worker.min.js',
   './vendor/tesseract/tesseract-core-simd-lstm.wasm.js',
   './vendor/tesseract/tesseract-core-lstm.wasm.js',
-  './vendor/tesseract/lang/fra.traineddata.gz'
+  './vendor/tesseract/lang/best_int/fra.traineddata.gz'
 ];
 
 self.addEventListener('install', (event) => {
   event.waitUntil(
-    caches.open(VERSION).then((cache) => cache.addAll(ASSETS)).then(() => self.skipWaiting())
+    // cache:'reload' : contourne le cache HTTP, pour ne jamais figer
+    // une ancienne version d'un fichier dans le nouveau cache.
+    caches.open(VERSION)
+      .then((cache) => cache.addAll(ASSETS.map((url) => new Request(url, { cache: 'reload' }))))
+      .then(() => self.skipWaiting())
   );
 });
 

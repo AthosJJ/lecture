@@ -1,7 +1,7 @@
 import * as db from './db.js';
 
 /* Synchroniser avec VERSION dans sw.js à chaque mise à jour. */
-const APP_VERSION = '9';
+const APP_VERSION = '10';
 
 /* ——— État en mémoire (rechargé depuis IndexedDB au démarrage) ——— */
 const state = {
@@ -10,13 +10,13 @@ const state = {
   quotes: [],
   route: 'library',
   currentBookId: null,
-  bookTab: 'notes',
+  bookTab: 'quotes',
   query: '',
   libraryTag: null,
   quotesBook: '',
   quotesTag: null,
   quotesQuery: '',
-  editing: { bookId: null, noteId: null, quoteId: null },
+  editing: { bookId: null, noteId: null, noteBookId: null, quoteId: null, quoteBookId: null },
   form: { type: 'book', status: 'toread', rating: 0 }
 };
 
@@ -29,6 +29,12 @@ function subtitleOf(book) {
   return book.type === 'podcast'
     ? [book.show, book.author].filter(Boolean).join(' — ')
     : (book.author || '');
+}
+
+/* Titre complet d'un livre, pour rappeler la source dans les formulaires. */
+function bookLabel(book) {
+  const sub = subtitleOf(book);
+  return book.title + (sub ? ' — ' + sub : '');
 }
 
 /* Position d'une citation : « p. 42 » ou « à 42 min » pour un podcast. */
@@ -80,19 +86,35 @@ function pct(book) {
   return Math.max(0, Math.min(100, Math.round(((book.currentPage || 0) / book.totalPages) * 100)));
 }
 
+const byRecent = (a, b) => (b.updatedAt || '').localeCompare(a.updatedAt || '');
+
 function bookById(id) { return state.books.find((b) => b.id === id); }
 function notesOf(id) { return state.notes.filter((n) => n.bookId === id).sort((a, b) => b.createdAt.localeCompare(a.createdAt)); }
 function quotesOf(id) { return state.quotes.filter((q) => q.bookId === id).sort((a, b) => (a.page ?? 1e9) - (b.page ?? 1e9)); }
 
+/* ——— Toast, avec bouton d'action facultatif (« Annuler ») ——— */
 let toastTimer = null;
-function toast(msg) {
+let toastAction = null;
+
+function toast(msg, action = null) {
   const el = $('#toast');
-  el.textContent = msg;
+  $('#toast-msg').textContent = msg;
+  const btn = $('#toast-action');
+  toastAction = action;
+  btn.hidden = !action;
+  if (action) btn.textContent = action.label;
+  el.classList.toggle('actionable', Boolean(action));
   el.classList.add('show');
   clearTimeout(toastTimer);
   // Les messages longs restent affichés plus longtemps.
-  const duration = Math.min(6000, Math.max(2200, msg.length * 55));
-  toastTimer = setTimeout(() => el.classList.remove('show'), duration);
+  const duration = action ? 5500 : Math.min(6000, Math.max(2200, msg.length * 55));
+  toastTimer = setTimeout(hideToast, duration);
+}
+
+function hideToast() {
+  clearTimeout(toastTimer);
+  $('#toast').classList.remove('show');
+  toastAction = null;
 }
 
 /* ——— Routage par hash (le geste retour iOS fonctionne) ——— */
@@ -102,6 +124,8 @@ function router() {
   const hash = location.hash || '#/library';
   const m = hash.match(/^#\/book\/(.+)$/);
   if (m && bookById(m[1])) {
+    // Un autre livre s'ouvre sur ses citations ; le même garde son onglet.
+    if (state.currentBookId !== m[1]) state.bookTab = 'quotes';
     state.route = 'book';
     state.currentBookId = m[1];
   } else if (hash === '#/quotes') {
@@ -115,31 +139,48 @@ function router() {
 }
 
 function render() {
+  const r = state.route;
+  // Ne remonte en haut et n'anime les cartes qu'en changeant d'écran, pas à
+  // chaque rafraîchissement (page +1, ajout d'une note, frappe…).
+  const screenKey = r + (r === 'book' ? ':' + state.currentBookId : '');
+  const sameScreen = render.lastScreen === screenKey;
+  $('#app').classList.toggle('no-anim', sameScreen);
+
   $$('.view').forEach((v) => v.classList.remove('active'));
-  $('#tabbar').classList.toggle('hidden', state.route === 'book');
-  $$('.tab').forEach((t) => t.classList.toggle('active', t.dataset.route === state.route));
+  $('#tabbar').classList.toggle('hidden', r === 'book');
+  $$('.tab').forEach((t) => t.classList.toggle('active', t.dataset.route === r));
+  $('#book-actions').hidden = r !== 'book';
+  $('#fab-quote').hidden = !((r === 'library' || r === 'quotes') && state.books.length > 0);
 
-  if (state.route === 'library') { $('#view-library').classList.add('active'); renderLibrary(); }
-  if (state.route === 'quotes') { $('#view-quotes').classList.add('active'); renderQuotesView(); }
-  if (state.route === 'stats') { $('#view-stats').classList.add('active'); renderStats(); }
-  if (state.route === 'book') { $('#view-book').classList.add('active'); renderBook(); }
+  if (r === 'library') { $('#view-library').classList.add('active'); renderLibrary(); }
+  if (r === 'quotes') { $('#view-quotes').classList.add('active'); renderQuotesView(); }
+  if (r === 'stats') { $('#view-stats').classList.add('active'); renderStats(); }
+  if (r === 'book') { $('#view-book').classList.add('active'); renderBook(); }
 
-  // Ne remonte en haut qu'en changeant d'écran, pas à chaque rafraîchissement
-  // (ajouter une note ne doit pas faire perdre la position de défilement).
-  const screenKey = state.route + (state.route === 'book' ? ':' + state.currentBookId : '');
-  if (render.lastScreen !== screenKey) window.scrollTo(0, 0);
+  if (!sameScreen) window.scrollTo(0, 0);
   render.lastScreen = screenKey;
+}
+
+/* Rafraîchit la liste sans rejouer les animations d'entrée. */
+function refresh(fn) {
+  $('#app').classList.add('no-anim');
+  fn();
 }
 
 /* ═══════════ ÉCRAN BIBLIOTHÈQUE ═══════════ */
 
+function coverHTML(book) {
+  const key = book.type === 'podcast' && book.show ? book.show : book.title;
+  const kind = book.type === 'article' ? ' article' : (book.type === 'podcast' ? ' podcast' : '');
+  return `<div class="cover${kind}" style="--h:${hueFromString(key)}"><span>${esc(initials(key))}</span></div>`;
+}
+
 function bookCard(book, i, matchBadge) {
   const p = pct(book);
-  const hue = hueFromString(book.type === 'podcast' && book.show ? book.show : book.title);
   const sub = subtitleOf(book);
   return `
   <article class="card book-card" data-id="${book.id}" style="animation-delay:${Math.min(i * 35, 350)}ms">
-    <div class="cover ${book.type === 'article' ? 'article' : ''}${book.type === 'podcast' ? ' podcast' : ''}" style="--h:${hue}"><span>${esc(initials(book.type === 'podcast' && book.show ? book.show : book.title))}</span></div>
+    ${coverHTML(book)}
     <div class="book-info">
       <h3>${esc(book.title)}</h3>
       ${sub ? `<p class="author">${esc(sub)}</p>` : ''}
@@ -176,7 +217,7 @@ function renderLibrary() {
     listEl.innerHTML = `<div class="empty">
       <span class="glyph">❧</span>
       <h3>Votre bibliothèque est vide</h3>
-      <p>Touchez + pour ajouter votre premier livre ou article.</p>
+      <p>Touchez + pour ajouter votre premier livre, article ou podcast.</p>
     </div>`;
     return;
   }
@@ -200,7 +241,6 @@ function renderLibrary() {
   }
 
   // Classement par statut
-  const byRecent = (a, b) => (b.updatedAt || '').localeCompare(a.updatedAt || '');
   listEl.innerHTML = STATUS_ORDER.map((status) => {
     const group = books.filter((b) => b.status === status).sort(byRecent);
     if (!group.length) return '';
@@ -209,22 +249,41 @@ function renderLibrary() {
   }).join('') || `<div class="empty"><h3>Aucun livre</h3><p>Aucun livre ne porte ce tag.</p></div>`;
 }
 
-/* ═══════════ ÉCRAN CITATIONS ═══════════ */
+/* ═══════════ NOTES & CITATIONS : cartes ═══════════
+   Toucher une carte l'ouvre pour la modifier ; la glisser vers la gauche
+   la supprime (avec « Annuler » dans le toast). */
+
+const LIST_HINT = '<p class="list-hint">Touchez pour modifier · glissez vers la gauche pour supprimer</p>';
 
 function quoteCard(qt, i, withSource = true) {
   const book = bookById(qt.bookId);
+  const place = quotePlace(qt, book) || (book && book.type === 'podcast' ? 'minutage non précisé' : 'page non précisée');
   return `
-  <blockquote class="card quote-card" data-id="${qt.id}" data-book="${qt.bookId}" style="animation-delay:${Math.min(i * 35, 350)}ms">
-    <span class="qmark">“</span>
-    <p class="qtext">${esc(qt.text)}</p>
-    <footer class="entry-foot">
-      <span>${withSource && book ? `<span class="qsource">${esc(book.title)}</span> · ` : ''}${esc(quotePlace(qt, book) || (book && book.type === 'podcast' ? 'minutage non précisé' : 'page non précisée'))}</span>
-      ${(qt.tags || []).length ? `<span class="tagline">${qt.tags.map((t) => `<span class="minitag">#${esc(t)}</span>`).join('')}</span>` : ''}
-      <span class="spacer"></span>
-      ${withSource ? '' : `<button class="q-edit" data-id="${qt.id}">Modifier</button><button class="del q-del" data-id="${qt.id}">Suppr.</button>`}
-    </footer>
-  </blockquote>`;
+  <div class="swipe-wrap" style="animation-delay:${Math.min(i * 35, 350)}ms">
+    <div class="swipe-bg" aria-hidden="true">Supprimer</div>
+    <blockquote class="card quote-card swipeable" data-kind="quote" data-id="${qt.id}" tabindex="0" aria-label="Citation — toucher pour modifier">
+      <span class="qmark">“</span>
+      <p class="qtext">${esc(qt.text)}</p>
+      <footer class="entry-foot">
+        <span>${withSource && book ? `<button type="button" class="qsource" data-book="${qt.bookId}">${esc(book.title)}</button> · ` : ''}${esc(place)}</span>
+        ${(qt.tags || []).length ? `<span class="tagline">${qt.tags.map((t) => `<span class="minitag">#${esc(t)}</span>`).join('')}</span>` : ''}
+      </footer>
+    </blockquote>
+  </div>`;
 }
+
+function noteCard(n, i) {
+  return `
+  <div class="swipe-wrap" style="animation-delay:${Math.min(i * 35, 350)}ms">
+    <div class="swipe-bg" aria-hidden="true">Supprimer</div>
+    <article class="card note-card swipeable" data-kind="note" data-id="${n.id}" tabindex="0" aria-label="Note — toucher pour modifier">
+      <p>${esc(n.text)}</p>
+      <footer class="entry-foot"><span>${fmtDate(n.createdAt)}</span></footer>
+    </article>
+  </div>`;
+}
+
+/* ═══════════ ÉCRAN CITATIONS ═══════════ */
 
 function renderQuotesView() {
   // Filtre par livre (levé si le livre filtré a été supprimé)
@@ -262,11 +321,13 @@ function renderQuotesView() {
   if (state.quotesTag) quotes = quotes.filter((q) => (q.tags || []).includes(state.quotesTag));
 
   $('#quotes-list').innerHTML = quotes.length
-    ? quotes.map((q, i) => quoteCard(q, i)).join('')
+    ? quotes.map((q, i) => quoteCard(q, i)).join('') + LIST_HINT
     : `<div class="empty">
         <span class="glyph">”</span>
         <h3>Aucune citation</h3>
-        <p>Ajoutez des citations depuis la fiche d'un livre, elles se retrouveront toutes ici.</p>
+        <p>${state.books.length
+          ? 'Touchez « Citation » pour en ajouter une : tapez, dictez ou scannez le passage.'
+          : 'Ajoutez d’abord un livre dans la Bibliothèque.'}</p>
       </div>`;
 }
 
@@ -276,12 +337,39 @@ function renderBook() {
   const book = bookById(state.currentBookId);
   if (!book) { navigate('#/library'); return; }
 
+  const pod = book.type === 'podcast';
   const p = pct(book);
   const dates = [];
   if (book.startDate) dates.push('début : ' + fmtDate(book.startDate));
   if (book.endDate) dates.push('fin : ' + fmtDate(book.endDate));
 
   const sub = subtitleOf(book);
+  let progressHTML = '';
+  if (book.totalPages) {
+    progressHTML = `
+    <div class="card progress-card">
+      <div class="head"><b>Progression</b><span>${pod ? `${book.currentPage || 0} / ${book.totalPages} min` : `p. ${book.currentPage || 0} / ${book.totalPages}`} · ${p}%</span></div>
+      <div class="progress"><i style="width:${p}%"></i></div>
+      <div class="stepper">
+        <button id="pg-minus" aria-label="${pod ? 'Reculer d’une minute' : 'Reculer d’une page'}">−</button>
+        <input id="pg-input" type="number" min="0" max="${book.totalPages}" inputmode="numeric" value="${book.currentPage || 0}" aria-label="${pod ? 'Minute actuelle' : 'Page actuelle'}">
+        <button id="pg-plus" aria-label="${pod ? 'Avancer d’une minute' : 'Avancer d’une page'}">+</button>
+        <button id="pg-plus10" aria-label="${pod ? 'Avancer de dix minutes' : 'Avancer de dix pages'}">+10</button>
+      </div>
+    </div>`;
+  } else if (book.status !== 'done') {
+    // Réglage express du nombre de pages, sans passer par « Modifier ».
+    progressHTML = `
+    <div class="card progress-card setup-card">
+      <div class="head"><b>Progression</b></div>
+      <p>${pod ? 'Indiquez la durée de l’épisode' : 'Indiquez le nombre de pages'} pour suivre votre avancée.</p>
+      <form class="inline-form" id="pg-setup">
+        <input id="pg-total" type="number" min="1" inputmode="numeric" enterkeyhint="done" placeholder="${pod ? 'Durée en minutes' : 'Nombre de pages'}" aria-label="${pod ? 'Durée en minutes' : 'Nombre de pages'}">
+        <button type="submit">OK</button>
+      </form>
+    </div>`;
+  }
+
   $('#book-content').innerHTML = `
     <div class="book-hero">
       <p class="kicker">${TYPE_LABELS[book.type] || 'Livre'}${book.createdAt ? ' · ajouté le ' + fmtDate(book.createdAt) : ''}</p>
@@ -294,49 +382,32 @@ function renderBook() {
       </div>
       ${book.status === 'done' && book.rating ? `<span class="rating-big">${stars(book.rating)}</span>` : ''}
     </div>
-    ${book.totalPages ? `
-    <div class="card progress-card">
-      <div class="head"><b>Progression</b><span>${book.type === 'podcast' ? `${book.currentPage || 0} / ${book.totalPages} min` : `p. ${book.currentPage || 0} / ${book.totalPages}`} · ${p}%</span></div>
-      <div class="progress"><i style="width:${p}%"></i></div>
-      <div class="stepper">
-        <button id="pg-minus" aria-label="Reculer d'une page">−</button>
-        <input id="pg-input" type="number" min="0" max="${book.totalPages}" inputmode="numeric" value="${book.currentPage || 0}" aria-label="Page actuelle">
-        <button id="pg-plus" aria-label="Avancer d'une page">+</button>
-        <button id="pg-plus10" aria-label="Avancer de dix pages">+10</button>
-      </div>
-    </div>` : ''}`;
+    ${progressHTML}`;
 
-  // Onglets
+  // Onglets (avec compteurs)
+  const notes = notesOf(book.id);
+  const quotes = quotesOf(book.id);
+  $('#count-quotes').textContent = quotes.length || '';
+  $('#count-notes').textContent = notes.length || '';
   $$('#book-tabs .seg-btn').forEach((b) => {
     const on = b.dataset.tab === state.bookTab;
     b.classList.toggle('active', on);
     b.setAttribute('aria-selected', on);
   });
-  $('#btn-add-entry').textContent = state.bookTab === 'notes' ? '+ Note' : '+ Citation';
 
   const contentEl = $('#book-tab-content');
   if (state.bookTab === 'notes') {
-    const notes = notesOf(book.id);
     contentEl.innerHTML = notes.length
-      ? notes.map((n, i) => `
-        <article class="card note-card" style="animation-delay:${Math.min(i * 35, 350)}ms">
-          <p>${esc(n.text)}</p>
-          <footer class="entry-foot">
-            <span>${fmtDate(n.createdAt)}</span>
-            <span class="spacer"></span>
-            <button class="n-edit" data-id="${n.id}">Modifier</button>
-            <button class="del n-del" data-id="${n.id}">Suppr.</button>
-          </footer>
-        </article>`).join('')
-      : `<div class="empty"><h3>Aucune note</h3><p>Notez vos réflexions au fil de la lecture.</p></div>`;
+      ? notes.map(noteCard).join('') + LIST_HINT
+      : `<div class="empty"><h3>Aucune note</h3><p>Touchez « Note » en bas pour noter vos réflexions au fil de la lecture.</p></div>`;
   } else {
-    const quotes = quotesOf(book.id);
     contentEl.innerHTML = quotes.length
-      ? quotes.map((q, i) => quoteCard(q, i, false)).join('')
-      : `<div class="empty"><h3>Aucune citation</h3><p>Sauvegardez les passages marquants avec leur numéro de page.</p></div>`;
+      ? quotes.map((q, i) => quoteCard(q, i, false)).join('') + LIST_HINT
+      : `<div class="empty"><h3>Aucune citation</h3><p>Touchez « Citation » en bas : tapez, dictez ou scannez le passage.</p></div>`;
   }
 
   bindProgressStepper(book);
+  bindProgressSetup(book);
 }
 
 function bindProgressStepper(book) {
@@ -358,12 +429,29 @@ function bindProgressStepper(book) {
       if (!book.endDate) book.endDate = todayISO();
     }
     await db.put('books', book);
-    renderBook();
+    render();
   };
   $('#pg-minus').addEventListener('click', () => apply((book.currentPage || 0) - 1));
   $('#pg-plus').addEventListener('click', () => apply((book.currentPage || 0) + 1));
   $('#pg-plus10').addEventListener('click', () => apply((book.currentPage || 0) + 10));
   input.addEventListener('change', () => apply(input.value));
+}
+
+function bindProgressSetup(book) {
+  const form = $('#pg-setup');
+  if (!form) return;
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const input = $('#pg-total');
+    const total = parseInt(input.value, 10);
+    if (!(total > 0)) { input.focus(); return; }
+    input.blur();
+    book.totalPages = total;
+    book.currentPage = Math.min(book.currentPage || 0, total);
+    book.updatedAt = new Date().toISOString();
+    await db.put('books', book);
+    render();
+  });
 }
 
 /* ═══════════ ÉCRAN STATISTIQUES ═══════════ */
@@ -426,41 +514,164 @@ function renderStats() {
     </div>` : ''}`;
 }
 
-/* ═══════════ FEUILLES MODALES ═══════════ */
+/* ═══════════ FEUILLES MODALES ═══════════
+   En-tête collant « Annuler / titre / Enregistrer », fermeture en glissant
+   vers le bas, et feuille toujours posée au-dessus du clavier iOS. */
 
 let openedSheet = null;
+let backdropTimer = null;
+
+const sheetKind = (sheet) => (sheet.id === 'sheet-quote' ? 'quote' : (sheet.id === 'sheet-note' ? 'note' : null));
 
 function openSheet(id) {
   const sheet = $(id);
   const backdrop = $('#backdrop');
+  if (openedSheet && openedSheet !== sheet) closeSheet({ keepBackdrop: true });
+  hideToast(); // un ancien message ne doit pas masquer le formulaire
+  clearTimeout(sheet.hideTimer);
+  clearTimeout(backdropTimer);
   openedSheet = sheet;
   sheet.hidden = false;
   backdrop.hidden = false;
-  requestAnimationFrame(() => {
-    sheet.classList.add('open');
-    backdrop.classList.add('open');
-  });
+  sheet.scrollTop = 0;
+  sheet.style.transform = '';
+  void sheet.offsetHeight; // applique la position de départ avant l'animation
+  sheet.classList.add('open');
+  backdrop.classList.add('open');
+  document.documentElement.classList.add('sheet-open');
 }
 
-function closeSheet() {
-  if (!openedSheet) return;
-  stopDictation();
-  closeOcrPanel();
+function closeSheet({ discard = false, keepBackdrop = false } = {}) {
   const sheet = openedSheet;
-  const backdrop = $('#backdrop');
-  sheet.classList.remove('open');
-  backdrop.classList.remove('open');
+  if (!sheet) return;
   openedSheet = null;
-  setTimeout(() => { sheet.hidden = true; backdrop.hidden = true; }, 400);
+  stopDictation();
+  const kind = sheetKind(sheet);
+  if (kind) {
+    if (discard) dropDraft(kind);
+    else { saveDraft(kind); draftBase[kind] = null; }
+  }
+  if (sheet.id === 'sheet-quote') closeOcrPanel();
+  if (sheet.contains(document.activeElement)) document.activeElement.blur();
+
+  sheet.classList.remove('open', 'dragging');
+  sheet.style.transform = '';
+  sheet.hideTimer = setTimeout(() => { sheet.hidden = true; }, 400);
+
+  if (!keepBackdrop) {
+    const backdrop = $('#backdrop');
+    backdrop.style.opacity = '';
+    backdrop.classList.remove('open');
+    backdropTimer = setTimeout(() => { if (!openedSheet) backdrop.hidden = true; }, 400);
+    document.documentElement.classList.remove('sheet-open');
+    // Une mise à jour arrivée pendant la saisie s'applique maintenant.
+    setTimeout(applyPendingUpdate, 2500);
+  }
+}
+
+/* Glisser la feuille vers le bas pour la fermer : depuis l'en-tête, ou
+   depuis le contenu quand il est tout en haut (hors champs de saisie). */
+function bindSheetDrag(sheet) {
+  const backdrop = $('#backdrop');
+  let g = null;
+  sheet.addEventListener('touchstart', (e) => {
+    if (e.touches.length !== 1 || openedSheet !== sheet) { g = null; return; }
+    const t = e.target;
+    const fromHead = Boolean(t.closest('.sheet-head'));
+    if (!fromHead && (sheet.scrollTop > 0 || t.closest('input, textarea, select, .ocr-lines'))) { g = null; return; }
+    g = { y0: e.touches[0].clientY, x0: e.touches[0].clientX, t0: Date.now(), dy: 0, fromHead, dragging: false, decided: false };
+  }, { passive: true });
+
+  sheet.addEventListener('touchmove', (e) => {
+    if (!g) return;
+    const dy = e.touches[0].clientY - g.y0;
+    const dx = e.touches[0].clientX - g.x0;
+    if (!g.decided) {
+      if (Math.abs(dy) < 8 && Math.abs(dx) < 8) return;
+      g.decided = true;
+      g.dragging = dy > 0 && Math.abs(dy) > Math.abs(dx) && (g.fromHead || sheet.scrollTop <= 0);
+      if (!g.dragging) { g = null; return; }
+      sheet.classList.add('dragging');
+    }
+    e.preventDefault();
+    g.dy = Math.max(0, dy);
+    sheet.style.transform = `translateY(${g.dy}px)`;
+    backdrop.style.opacity = String(Math.max(0.15, 1 - g.dy / Math.max(1, sheet.offsetHeight)));
+  }, { passive: false });
+
+  const end = () => {
+    if (!g) return;
+    const { dragging, dy, t0 } = g;
+    g = null;
+    if (!dragging) return;
+    sheet.classList.remove('dragging');
+    backdrop.style.opacity = '';
+    const speed = dy / Math.max(1, Date.now() - t0);
+    if (dy > 110 || (dy > 40 && speed > 0.5)) closeSheet();
+    else sheet.style.transform = '';
+  };
+  sheet.addEventListener('touchend', end);
+  sheet.addEventListener('touchcancel', end);
+}
+
+/* Le clavier iOS ne redimensionne pas la page : on suit la zone visible
+   pour garder la feuille (et son bouton Enregistrer) au-dessus du clavier. */
+function syncViewport() {
+  const vv = window.visualViewport;
+  if (!vv) return;
+  const kb = Math.round(window.innerHeight - vv.height - vv.offsetTop);
+  const st = document.documentElement.style;
+  st.setProperty('--kb', (kb > 60 ? kb : 0) + 'px');
+  st.setProperty('--vvh', Math.round(vv.height) + 'px');
 }
 
 function setSegmented(containerId, value) {
   $$(`#${containerId} .seg-btn`).forEach((b) => b.classList.toggle('active', b.dataset.value === value));
 }
 
+/* ——— Suggestions de tags : un toucher ajoute ou retire le tag ——— */
+function tagPool(items) {
+  const counts = new Map();
+  for (const it of items) for (const t of it.tags || []) counts.set(t, (counts.get(t) || 0) + 1);
+  return [...counts.entries()]
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0], 'fr'))
+    .map(([t]) => t);
+}
+
+function renderTagSuggest(input, box, pool) {
+  const current = parseTags(input.value);
+  const shown = pool.slice(0, 12);
+  for (const t of current) if (pool.includes(t) && !shown.includes(t)) shown.push(t);
+  box.hidden = shown.length === 0;
+  box.innerHTML = shown.map((t) =>
+    `<button type="button" class="chip ${current.includes(t) ? 'active' : ''}" data-tag="${esc(t)}">${esc(t)}</button>`).join('');
+}
+
+function bindTagSuggest(input, box, poolFn) {
+  input.addEventListener('input', () => renderTagSuggest(input, box, poolFn()));
+  box.addEventListener('click', (e) => {
+    const chip = e.target.closest('.chip');
+    if (!chip) return;
+    const tags = parseTags(input.value);
+    const t = chip.dataset.tag;
+    input.value = (tags.includes(t) ? tags.filter((x) => x !== t) : [...tags, t]).join(', ');
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+}
+
+const bookTagPool = () => tagPool(state.books);
+const quoteTagPool = () => tagPool(state.quotes);
+
+/* ——— Livre ——— */
 function syncRatingUI() {
   $('#rating-field').hidden = state.form.status !== 'done';
   $$('#rating-stars button').forEach((b) => b.classList.toggle('on', Number(b.dataset.v) <= state.form.rating));
+}
+
+function setBookDetails(open) {
+  $('#book-more').hidden = !open;
+  $('#book-more-btn').setAttribute('aria-expanded', String(open));
+  $('#book-more-btn span').textContent = open ? 'Moins de détails' : 'Plus de détails';
 }
 
 function openBookForm(book = null) {
@@ -481,11 +692,18 @@ function openBookForm(book = null) {
   form.tags.value = book ? (book.tags || []).join(', ') : '';
   $('#btn-delete-book').hidden = !book;
 
+  // Formulaire court par défaut ; détails dépliés s'ils sont déjà remplis.
+  const hasDetails = Boolean(book && (book.totalPages || book.currentPage || book.startDate
+    || book.endDate || (book.tags || []).length));
+  setBookDetails(hasDetails);
+  renderTagSuggest(form.tags, $('#book-tag-suggest'), bookTagPool());
+
   setSegmented('field-type', state.form.type);
   setSegmented('field-status', state.form.status);
   syncRatingUI();
   syncTypeUI();
   openSheet('#sheet-book');
+  if (!book) form.title.focus({ preventScroll: true });
 }
 
 /* Adapte le formulaire au type : champ Émission et unités pour un podcast. */
@@ -509,7 +727,7 @@ async function saveBookForm(e) {
   e.preventDefault();
   const form = $('#form-book');
   const title = form.title.value.trim();
-  if (!title) { form.title.focus(); return; }
+  if (!title) { form.title.focus(); toast('Le titre est obligatoire'); return; }
 
   const now = new Date().toISOString();
   const existing = state.editing.bookId ? bookById(state.editing.bookId) : null;
@@ -543,65 +761,180 @@ async function saveBookForm(e) {
   render();
 }
 
+/* Suppression immédiate, rattrapable avec « Annuler » dans le toast. */
 async function deleteCurrentBook() {
   const book = bookById(state.editing.bookId);
   if (!book) return;
-  const nb = notesOf(book.id).length, nq = quotesOf(book.id).length;
-  const extra = (nb || nq) ? `\n(${nb} note${nb > 1 ? 's' : ''} et ${nq} citation${nq > 1 ? 's' : ''} seront aussi supprimées)` : '';
-  if (!confirm(`Supprimer « ${book.title} » ?${extra}`)) return;
+  const notes = notesOf(book.id);
+  const quotes = quotesOf(book.id);
   await db.removeBookCascade(book.id);
   state.books = state.books.filter((b) => b.id !== book.id);
   state.notes = state.notes.filter((n) => n.bookId !== book.id);
   state.quotes = state.quotes.filter((q) => q.bookId !== book.id);
   closeSheet();
-  toast('Supprimé');
-  navigate('#/library');
+  if (state.route === 'book') navigate('#/library');
   render();
+  toast(`${TYPE_LABELS[book.type] || 'Livre'} supprimé`, {
+    label: 'Annuler',
+    run: async () => {
+      await db.putMany({ books: [book], notes, quotes });
+      if (!bookById(book.id)) state.books.push(book);
+      state.notes.push(...notes.filter((n) => !state.notes.some((x) => x.id === n.id)));
+      state.quotes.push(...quotes.filter((q) => !state.quotes.some((x) => x.id === q.id)));
+      render();
+      toast('Restauré');
+    }
+  });
 }
 
-/* — Notes — */
-function openNoteForm(note = null) {
+/* ═══════════ BROUILLONS ═══════════
+   Le texte d'une note ou d'une citation non enregistrée est gardé
+   (localStorage) : une fermeture par erreur, un rechargement ou iOS qui
+   ferme l'app ne font rien perdre. « Annuler » l'efface volontairement. */
+
+const DRAFT_PREFIX = 'lecture-brouillon:';
+const draftBase = { note: null, quote: null }; // valeurs à l'ouverture
+let draftTimer = null;
+
+function draftKey(kind) {
+  const e = state.editing;
+  const id = kind === 'quote' ? e.quoteId : e.noteId;
+  const bookId = kind === 'quote' ? e.quoteBookId : e.noteBookId;
+  return DRAFT_PREFIX + kind + ':' + (id || 'nouveau:' + bookId);
+}
+
+function readEntryForm(kind) {
+  const f = kind === 'quote' ? $('#form-quote') : $('#form-note');
+  return kind === 'quote'
+    ? { text: f.text.value, page: f.page.value, tags: f.tags.value }
+    : { text: f.text.value };
+}
+
+function writeEntryForm(kind, v) {
+  const f = kind === 'quote' ? $('#form-quote') : $('#form-note');
+  f.text.value = v.text || '';
+  if (kind === 'quote') {
+    f.page.value = v.page ?? '';
+    f.tags.value = v.tags ?? '';
+    renderTagSuggest(f.tags, $('#quote-tag-suggest'), quoteTagPool());
+  }
+}
+
+function saveDraft(kind) {
+  clearTimeout(draftTimer);
+  const base = draftBase[kind];
+  if (!base) return;
+  const cur = readEntryForm(kind);
+  const dirty = Object.keys(cur).some((k) => cur[k] !== base[k]);
+  try {
+    if (dirty && cur.text.trim()) localStorage.setItem(draftKey(kind), JSON.stringify(cur));
+    else localStorage.removeItem(draftKey(kind));
+  } catch { /* stockage plein ou bloqué : tant pis pour le brouillon */ }
+}
+
+function scheduleDraftSave(kind) {
+  clearTimeout(draftTimer);
+  draftTimer = setTimeout(() => saveDraft(kind), 400);
+}
+
+/* À l'ouverture : remet le brouillon s'il y en a un, avec un bandeau. */
+function restoreDraft(kind) {
+  let d = null;
+  try { d = JSON.parse(localStorage.getItem(draftKey(kind)) || 'null'); } catch { d = null; }
+  const has = Boolean(d && typeof d.text === 'string' && d.text.trim() && d.text !== draftBase[kind].text);
+  if (has) writeEntryForm(kind, { ...draftBase[kind], ...d });
+  $(`#${kind}-draft`).hidden = !has;
+}
+
+function dropDraft(kind) {
+  clearTimeout(draftTimer);
+  try { localStorage.removeItem(draftKey(kind)); } catch { /* rien à faire */ }
+  draftBase[kind] = null;
+}
+
+function forgetDraftOf(kind, id) {
+  try { localStorage.removeItem(DRAFT_PREFIX + kind + ':' + id); } catch { /* rien à faire */ }
+}
+
+/* ——— Notes ——— */
+function openNoteForm(note = null, bookId = null) {
+  const bid = note ? note.bookId : (bookId || state.currentBookId);
+  const book = bookById(bid);
+  if (!book) return;
   const form = $('#form-note');
   form.reset();
   state.editing.noteId = note ? note.id : null;
+  state.editing.noteBookId = bid;
   $('#sheet-note-title').textContent = note ? 'Modifier la note' : 'Nouvelle note';
-  form.text.value = note ? note.text : '';
+  $('#sheet-note-book').textContent = bookLabel(book);
+  draftBase.note = { text: note ? note.text : '' };
+  writeEntryForm('note', draftBase.note);
+  restoreDraft('note');
   $('#btn-delete-note').hidden = !note;
   openSheet('#sheet-note');
+  if (!note) form.text.focus({ preventScroll: true });
 }
 
 async function saveNoteForm(e) {
   e.preventDefault();
   const form = $('#form-note');
   const text = form.text.value.trim();
-  if (!text) { form.text.focus(); return; }
+  if (!text) { form.text.focus(); toast('La note est vide'); return; }
+  const book = bookById(state.editing.noteBookId);
+  if (!book) { closeSheet(); return; }
   const now = new Date().toISOString();
   let note = state.editing.noteId ? state.notes.find((n) => n.id === state.editing.noteId) : null;
   if (note) {
     note.text = text;
     note.updatedAt = now;
   } else {
-    note = { id: uid(), bookId: state.currentBookId, text, createdAt: now, updatedAt: now };
+    note = { id: uid(), bookId: book.id, text, createdAt: now, updatedAt: now };
     state.notes.push(note);
   }
   await db.put('notes', note);
+  dropDraft('note');
   closeSheet();
+  if (state.route === 'book' && state.currentBookId === book.id) state.bookTab = 'notes';
   toast('Note enregistrée');
   render();
 }
 
-/* — Citations — */
-function openQuoteForm(quote = null) {
+async function deleteNote(id) {
+  const note = state.notes.find((n) => n.id === id);
+  if (!note) return;
+  await db.remove('notes', id);
+  state.notes = state.notes.filter((n) => n.id !== id);
+  forgetDraftOf('note', id);
+  render();
+  toast('Note supprimée', {
+    label: 'Annuler',
+    run: async () => {
+      await db.put('notes', note);
+      if (!state.notes.some((n) => n.id === note.id)) state.notes.push(note);
+      render();
+    }
+  });
+}
+
+/* ——— Citations ——— */
+function openQuoteForm(quote = null, bookId = null) {
+  const bid = quote ? quote.bookId : (bookId || state.currentBookId);
+  const book = bookById(bid);
+  if (!book) return;
   const form = $('#form-quote');
   form.reset();
   closeOcrPanel();
-  const book = bookById(state.currentBookId);
-  $('#quote-page-label').textContent = book && book.type === 'podcast' ? 'Minute' : 'Page';
   state.editing.quoteId = quote ? quote.id : null;
+  state.editing.quoteBookId = bid;
+  $('#quote-page-label').textContent = book.type === 'podcast' ? 'Minute' : 'Page';
   $('#sheet-quote-title').textContent = quote ? 'Modifier la citation' : 'Nouvelle citation';
-  form.text.value = quote ? quote.text : '';
-  form.page.value = quote && quote.page != null ? quote.page : '';
-  form.tags.value = quote ? (quote.tags || []).join(', ') : '';
+  $('#sheet-quote-book').textContent = bookLabel(book);
+  // Nouvelle citation : page pré-remplie avec la page où l'on en est.
+  draftBase.quote = quote
+    ? { text: quote.text, page: quote.page != null ? String(quote.page) : '', tags: (quote.tags || []).join(', ') }
+    : { text: '', page: book.currentPage > 0 ? String(book.currentPage) : '', tags: '' };
+  writeEntryForm('quote', draftBase.quote);
+  restoreDraft('quote');
   $('#btn-delete-quote').hidden = !quote;
   openSheet('#sheet-quote');
 }
@@ -610,22 +943,157 @@ async function saveQuoteForm(e) {
   e.preventDefault();
   const form = $('#form-quote');
   const text = form.text.value.trim();
-  if (!text) { form.text.focus(); return; }
+  if (!text) { form.text.focus(); toast('Écrivez, dictez ou scannez la citation'); return; }
+  const book = bookById(state.editing.quoteBookId);
+  if (!book) { closeSheet(); return; }
   const now = new Date().toISOString();
   let quote = state.editing.quoteId ? state.quotes.find((q) => q.id === state.editing.quoteId) : null;
   if (quote) {
     quote.text = text;
     quote.updatedAt = now;
   } else {
-    quote = { id: uid(), bookId: state.currentBookId, text, createdAt: now, updatedAt: now };
+    quote = { id: uid(), bookId: book.id, text, createdAt: now, updatedAt: now };
     state.quotes.push(quote);
   }
   quote.page = form.page.value === '' ? null : Math.max(0, parseInt(form.page.value, 10) || 0);
   quote.tags = parseTags(form.tags.value);
   await db.put('quotes', quote);
+
+  // Une citation plus loin que la page notée fait avancer la progression.
+  let progressed = null;
+  if (quote.page != null && book.status !== 'done') {
+    const target = book.totalPages ? Math.min(quote.page, book.totalPages) : quote.page;
+    if (target > (book.currentPage || 0)) {
+      book.currentPage = target;
+      if (book.status === 'toread') {
+        book.status = 'reading';
+        if (!book.startDate) book.startDate = todayISO();
+      }
+      book.updatedAt = now;
+      await db.put('books', book);
+      progressed = target;
+    }
+  }
+
+  dropDraft('quote');
   closeSheet();
-  toast('Citation enregistrée');
+  if (state.route === 'book' && state.currentBookId === book.id) state.bookTab = 'quotes';
+  toast(progressed == null
+    ? 'Citation enregistrée'
+    : `Citation enregistrée · progression : ${book.type === 'podcast' ? progressed + ' min' : 'p. ' + progressed}`);
   render();
+}
+
+async function deleteQuote(id) {
+  const quote = state.quotes.find((q) => q.id === id);
+  if (!quote) return;
+  await db.remove('quotes', id);
+  state.quotes = state.quotes.filter((q) => q.id !== id);
+  forgetDraftOf('quote', id);
+  render();
+  toast('Citation supprimée', {
+    label: 'Annuler',
+    run: async () => {
+      await db.put('quotes', quote);
+      if (!state.quotes.some((q) => q.id === quote.id)) state.quotes.push(quote);
+      render();
+    }
+  });
+}
+
+function deleteEntry(kind, id) {
+  return kind === 'note' ? deleteNote(id) : deleteQuote(id);
+}
+
+function openEntry(kind, id) {
+  if (kind === 'note') {
+    const note = state.notes.find((n) => n.id === id);
+    if (note) openNoteForm(note);
+  } else {
+    const quote = state.quotes.find((q) => q.id === id);
+    if (quote) openQuoteForm(quote);
+  }
+}
+
+/* ——— Citation rapide : bouton flottant ——— */
+function quickQuote() {
+  if (!state.books.length) { openBookForm(); toast('Ajoutez d’abord un livre'); return; }
+  if (state.route === 'quotes' && state.quotesBook && bookById(state.quotesBook)) {
+    openQuoteForm(null, state.quotesBook);
+    return;
+  }
+  const reading = state.books.filter((b) => b.status === 'reading');
+  if (reading.length === 1) { openQuoteForm(null, reading[0].id); return; }
+  if (state.books.length === 1) { openQuoteForm(null, state.books[0].id); return; }
+  openBookPicker();
+}
+
+function openBookPicker() {
+  const reading = state.books.filter((b) => b.status === 'reading').sort(byRecent);
+  const others = state.books.filter((b) => b.status !== 'reading').sort(byRecent);
+  const row = (b) => {
+    const sub = subtitleOf(b);
+    return `<button type="button" class="pick-row" data-id="${b.id}">
+      ${coverHTML(b)}
+      <span class="pick-info"><b>${esc(b.title)}</b>${sub ? `<small>${esc(sub)}</small>` : ''}</span>
+    </button>`;
+  };
+  $('#pick-list').innerHTML =
+    (reading.length ? `<h3 class="section-title">En cours</h3>` + reading.map(row).join('') : '')
+    + (others.length ? `<h3 class="section-title">${reading.length ? 'Autres' : 'Tous les titres'}</h3>` + others.map(row).join('') : '');
+  openSheet('#sheet-pick');
+}
+
+/* ——— Glisser une carte vers la gauche pour la supprimer ——— */
+let swipeEndedAt = 0;
+const swipeThreshold = (card) => Math.min(130, card.offsetWidth * 0.35);
+
+function bindSwipeToDelete(container) {
+  let s = null;
+  const settle = (card) => {
+    card.classList.remove('swiping');
+    card.style.transform = '';
+    card.parentElement.classList.remove('revealing', 'armed');
+  };
+  container.addEventListener('pointerdown', (e) => {
+    if (e.pointerType === 'mouse' || !e.isPrimary) return;
+    const card = e.target.closest('.swipeable');
+    if (!card || e.target.closest('button')) return;
+    s = { card, id: e.pointerId, x0: e.clientX, y0: e.clientY, dx: 0, swiping: false };
+  });
+  container.addEventListener('pointermove', (e) => {
+    if (!s || e.pointerId !== s.id) return;
+    const mx = e.clientX - s.x0;
+    const my = e.clientY - s.y0;
+    if (!s.swiping) {
+      if (Math.abs(mx) < 10 && Math.abs(my) < 10) return;
+      if (mx >= 0 || Math.abs(mx) < Math.abs(my) * 1.3) { s = null; return; } // défilement
+      s.swiping = true;
+      s.card.classList.add('swiping');
+      s.card.parentElement.classList.add('revealing');
+      try { s.card.setPointerCapture(s.id); } catch { /* déjà capturé */ }
+    }
+    s.dx = Math.min(0, mx);
+    s.card.style.transform = `translateX(${s.dx}px)`;
+    s.card.parentElement.classList.toggle('armed', -s.dx > swipeThreshold(s.card));
+  });
+  const finish = (e, cancelled) => {
+    if (!s || e.pointerId !== s.id) return;
+    const { card, swiping, dx } = s;
+    s = null;
+    if (!swiping) return;
+    swipeEndedAt = Date.now();
+    if (!cancelled && -dx > swipeThreshold(card)) {
+      card.classList.remove('swiping');
+      card.style.transform = 'translateX(-110%)';
+      card.style.opacity = '0';
+      setTimeout(() => deleteEntry(card.dataset.kind, card.dataset.id), 200);
+    } else {
+      settle(card);
+    }
+  };
+  container.addEventListener('pointerup', (e) => finish(e, false));
+  container.addEventListener('pointercancel', (e) => finish(e, true));
 }
 
 /* ═══════════ EXPORTS ═══════════ */
@@ -727,7 +1195,28 @@ async function importJSONFile(file) {
   }
 }
 
-/* ═══════════ MISE À JOUR FORCÉE ═══════════ */
+/* ═══════════ MISES À JOUR ═══════════
+   Une nouvelle version recharge l'app, mais jamais pendant une saisie :
+   elle attend la fermeture du formulaire ou le passage en arrière-plan. */
+
+let updatePending = false;
+let reloading = false;
+
+function reloadApp() {
+  if (reloading) return;
+  reloading = true;
+  location.reload();
+}
+
+function isEditing() {
+  const a = document.activeElement;
+  return Boolean(openedSheet) || !$('#cropper').hidden
+    || Boolean(a && a.matches && a.matches('input, textarea, select'));
+}
+
+function applyPendingUpdate() {
+  if (updatePending && !isEditing()) reloadApp();
+}
 
 async function forceUpdate() {
   if (!('serviceWorker' in navigator)) { location.reload(); return; }
@@ -742,15 +1231,13 @@ async function forceUpdate() {
   const reg = await navigator.serviceWorker.getRegistration();
   if (!reg) { location.reload(); return; }
 
-  let reloaded = false;
-  const reload = () => { if (!reloaded) { reloaded = true; location.reload(); } };
   // Le nouveau service worker prend le contrôle (skipWaiting + claim) : on recharge.
-  navigator.serviceWorker.addEventListener('controllerchange', reload, { once: true });
+  navigator.serviceWorker.addEventListener('controllerchange', reloadApp, { once: true });
 
   await reg.update();
   if (reg.installing || reg.waiting) {
     toast('Mise à jour en cours…');
-    setTimeout(reload, 15000); // garde-fou si controllerchange n'arrive pas
+    setTimeout(reloadApp, 15000); // garde-fou si controllerchange n'arrive pas
   } else {
     toast('Application déjà à jour');
   }
@@ -764,8 +1251,6 @@ async function forceUpdate() {
 
 const IS_IOS = /iP(hone|ad|od)/.test(navigator.userAgent)
   || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
-const IS_STANDALONE = navigator.standalone === true
-  || window.matchMedia('(display-mode: standalone)').matches;
 
 const dict = { active: false, rec: null, btn: null, ta: null, base: '', startedAt: 0, gotResult: false, failedHard: false };
 
@@ -816,6 +1301,7 @@ function dictationSession() {
     let transcript = '';
     for (const res of e.results) transcript += res[0].transcript;
     dict.ta.value = (dict.base ? dict.base + ' ' : '') + transcript.trim();
+    dict.ta.dispatchEvent(new Event('input', { bubbles: true })); // brouillon
   };
   r.onerror = (e) => {
     if (e.error === 'not-allowed' || e.error === 'service-not-allowed' || e.error === 'audio-capture') {
@@ -889,40 +1375,16 @@ async function toggleDictation(textarea, btn) {
   }
 }
 
-/* ═══════════ SCAN DE TEXTE (OCR Tesseract.js, 100 % local) ═══════════ */
+/* ═══════════ SCAN DE TEXTE (OCR Tesseract.js, 100 % local) ═══════════
+   Parcours : photo (appareil photo ou galerie) → recadrage du passage →
+   prétraitement → lecture → lignes à cocher → insertion nettoyée.
+   Le recadrage est décisif : sur une photo de livre ouvert, lire toute
+   l'image mélange les lignes des deux pages. */
 
-let ocrWorker = null;
-
-function ocrStatus(msg) { $('#ocr-status').textContent = msg; }
-
-function closeOcrPanel() {
-  $('#ocr-panel').hidden = true;
-  $('#ocr-choice').hidden = true;
-  $('#ocr-status').textContent = '';
-  $('#ocr-lines').innerHTML = '';
-  $('#ocr-actions').hidden = true;
-  $('#ocr-photo').hidden = true;
-  $('#ocr-photo').removeAttribute('src');
-  if (ocrPhotoURL) { URL.revokeObjectURL(ocrPhotoURL); ocrPhotoURL = null; }
-}
-
-/* Sur iOS, la meilleure reconnaissance est celle d'Apple, intégrée au
-   clavier (« Scanner le texte ») : on la propose en premier choix. */
-function openScanChooser() {
-  if (!IS_IOS) { $('#ocr-file').click(); return; }
-  $('#ocr-panel').hidden = false;
-  $('#ocr-lines').innerHTML = '';
-  $('#ocr-actions').hidden = true;
-  $('#ocr-photo').hidden = true;
-  $('#ocr-status').textContent = '';
-  $('#ocr-choice').hidden = false;
-}
-
-function startNativeScan() {
-  $('#ocr-choice').hidden = true;
-  ocrStatus('Touchez le champ Citation, touchez-le à nouveau, puis choisissez « Scanner le texte » 📷 dans le menu. Le texte visé par la caméra s’écrit directement dans le champ.');
-  $('#form-quote').text.focus();
-}
+let ocrWorkerPromise = null;
+let ocrProgress = null; // rappel de progression de la lecture en cours
+const ocr = { url: null, previewURL: null, box: null, drag: null, run: 0 };
+const CROP_MIN = 0.04; // taille minimale du cadre (fraction de la photo)
 
 function loadScript(src) {
   return new Promise((resolve, reject) => {
@@ -938,140 +1400,415 @@ function loadScript(src) {
    relatives par rapport à son propre fichier, pas à la page. */
 const vendorURL = (p) => new URL(p, document.baseURI).href;
 
-async function getOcrWorker() {
-  if (ocrWorker) return ocrWorker;
-  if (!window.Tesseract) {
-    ocrStatus('Chargement du moteur de reconnaissance…');
-    await loadScript('./vendor/tesseract/tesseract.min.js');
+function getOcrWorker() {
+  if (!ocrWorkerPromise) {
+    ocrWorkerPromise = (async () => {
+      if (!window.Tesseract) await loadScript('./vendor/tesseract/tesseract.min.js');
+      const worker = await Tesseract.createWorker('fra', 1, {
+        workerPath: vendorURL('vendor/tesseract/worker.min.js'),
+        corePath: vendorURL('vendor/tesseract'),
+        langPath: vendorURL('vendor/tesseract/lang/best_int'),
+        gzip: true,
+        // Clé de cache neuve : sans elle, l'ancien modèle « fast », gardé
+        // dans IndexedDB sous « ./fra.traineddata », resterait utilisé.
+        cachePath: 'fra-best-int',
+        logger: (m) => {
+          if (m.status === 'recognizing text' && ocrProgress) ocrProgress(m.progress);
+        }
+      });
+      await worker.setParameters({
+        tessedit_pageseg_mode: '6', // un seul bloc de texte : le passage recadré
+        user_defined_dpi: '300'
+      });
+      dropStaleOcrCache();
+      return worker;
+    })();
+    ocrWorkerPromise.catch(() => { ocrWorkerPromise = null; }); // on retentera
   }
-  ocrStatus('Initialisation du moteur…');
-  ocrWorker = await Tesseract.createWorker('fra', 1, {
-    workerPath: vendorURL('vendor/tesseract/worker.min.js'),
-    corePath: vendorURL('vendor/tesseract'),
-    langPath: vendorURL('vendor/tesseract/lang'),
-    gzip: true,
-    logger: (m) => {
-      if (m.status === 'recognizing text') {
-        ocrStatus(`Reconnaissance… ${Math.round(m.progress * 100)} %`);
-      }
-    }
-  });
-  await ocrWorker.setParameters({
-    tessedit_pageseg_mode: '6', // un seul bloc de texte : le cas d'une citation
-    user_defined_dpi: '300'
-  });
-  return ocrWorker;
+  return ocrWorkerPromise;
 }
 
-/* Prépare la photo pour l'OCR : redimensionnement vers ~2400 px puis
-   binarisation adaptative locale (seuil calculé zone par zone via image
-   intégrale). C'est la technique standard pour les documents photographiés :
-   elle neutralise les ombres de reliure, l'éclairage de côté et le fond. */
-async function prepareImageForOCR(file) {
-  const url = URL.createObjectURL(file);
+/* Démarre le moteur pendant que l'on recadre : pas d'attente ensuite. */
+function warmOcr() { getOcrWorker().catch(() => {}); }
+
+/* Moteur en échec (iOS peut arrêter le worker faute de mémoire) :
+   on le jette, le prochain scan en recrée un neuf. */
+function resetOcrWorker() {
+  const p = ocrWorkerPromise;
+  ocrWorkerPromise = null;
+  if (p) p.then((w) => w.terminate()).catch(() => {});
+}
+
+/* Libère l'ancien modèle (« fast ») laissé en cache par les versions précédentes. */
+function dropStaleOcrCache() {
   try {
-    const img = new Image();
-    img.src = url;
-    await img.decode();
-    const TARGET = 2400;
-    const longest = Math.max(img.naturalWidth, img.naturalHeight);
-    // Réduit les grandes photos, agrandit légèrement les petites images.
-    const scale = Math.min(1.5, TARGET / longest);
-    const canvas = document.createElement('canvas');
-    const w = Math.round(img.naturalWidth * scale);
-    const h = Math.round(img.naturalHeight * scale);
-    canvas.width = w;
-    canvas.height = h;
-    const ctx = canvas.getContext('2d');
-    ctx.drawImage(img, 0, 0, w, h);
-
-    const imgData = ctx.getImageData(0, 0, w, h);
-    const px = imgData.data;
-
-    // Luminance + léger flou 3×3 séparable (réduit le bruit de capteur)
-    const gray = new Uint8ClampedArray(w * h);
-    for (let i = 0, j = 0; j < gray.length; i += 4, j++) {
-      gray[j] = (px[i] * 299 + px[i + 1] * 587 + px[i + 2] * 114) / 1000;
-    }
-    const tmp = new Uint8ClampedArray(w * h);
-    for (let y = 0; y < h; y++) {
-      const row = y * w;
-      for (let x = 0; x < w; x++) {
-        const a = gray[row + Math.max(0, x - 1)], b = gray[row + x], c = gray[row + Math.min(w - 1, x + 1)];
-        tmp[row + x] = (a + b + c) / 3;
-      }
-    }
-    for (let y = 0; y < h; y++) {
-      const up = Math.max(0, y - 1) * w, mid = y * w, dn = Math.min(h - 1, y + 1) * w;
-      for (let x = 0; x < w; x++) {
-        gray[mid + x] = (tmp[up + x] + tmp[mid + x] + tmp[dn + x]) / 3;
-      }
-    }
-
-    // Image intégrale pour obtenir la moyenne locale en O(1)
-    const integ = new Float64Array((w + 1) * (h + 1));
-    for (let y = 0; y < h; y++) {
-      let rowSum = 0;
-      for (let x = 0; x < w; x++) {
-        rowSum += gray[y * w + x];
-        integ[(y + 1) * (w + 1) + (x + 1)] = integ[y * (w + 1) + (x + 1)] + rowSum;
-      }
-    }
-
-    // Seuil adaptatif : noir si nettement plus sombre que son voisinage
-    const r = Math.max(12, Math.round(longest * scale / 60));
-    const K = 0.82;
-    for (let y = 0; y < h; y++) {
-      const y0 = Math.max(0, y - r), y1 = Math.min(h - 1, y + r);
-      for (let x = 0; x < w; x++) {
-        const x0 = Math.max(0, x - r), x1 = Math.min(w - 1, x + r);
-        const area = (y1 - y0 + 1) * (x1 - x0 + 1);
-        const sum = integ[(y1 + 1) * (w + 1) + (x1 + 1)] - integ[y0 * (w + 1) + (x1 + 1)]
-          - integ[(y1 + 1) * (w + 1) + x0] + integ[y0 * (w + 1) + x0];
-        const v = gray[y * w + x] < (sum / area) * K ? 0 : 255;
-        const o = (y * w + x) * 4;
-        px[o] = px[o + 1] = px[o + 2] = v;
-      }
-    }
-    ctx.putImageData(imgData, 0, 0);
-    return await new Promise((res) => canvas.toBlob(res, 'image/png'));
-  } finally {
-    URL.revokeObjectURL(url);
-  }
+    const req = indexedDB.open('keyval-store');
+    req.onupgradeneeded = () => req.transaction.abort(); // base absente : ne rien créer
+    req.onsuccess = () => {
+      const idb = req.result;
+      try {
+        if (idb.objectStoreNames.contains('keyval')) {
+          idb.transaction('keyval', 'readwrite').objectStore('keyval').delete('./fra.traineddata');
+        }
+      } catch { /* sans importance */ }
+      idb.close();
+    };
+    req.onerror = () => {};
+  } catch { /* stockage indisponible */ }
 }
 
-let ocrPhotoURL = null;
+function setOcrStatus(msg, busy = false) {
+  const el = $('#ocr-status');
+  el.textContent = msg;
+  el.classList.toggle('busy', busy);
+}
 
-async function runOCR(file) {
-  $('#ocr-panel').hidden = false;
-  $('#ocr-choice').hidden = true;
+function closeOcrPanel() {
+  closeCropper();
+  $('#ocr-panel').hidden = true;
+  setOcrStatus('');
   $('#ocr-lines').innerHTML = '';
   $('#ocr-actions').hidden = true;
+  const preview = $('#ocr-preview');
+  preview.hidden = true;
+  preview.removeAttribute('src');
+  if (ocr.previewURL) { URL.revokeObjectURL(ocr.previewURL); ocr.previewURL = null; }
+  $('#crop-img').removeAttribute('src');
+  if (ocr.url) { URL.revokeObjectURL(ocr.url); ocr.url = null; }
+  ocrProgress = null;
+  ocr.run++; // une lecture encore en cours sera ignorée
+}
 
-  // Aperçu de la photo (sur iOS, Live Text permet d'y sélectionner
-  // le texte directement avec un appui long : second filet de secours).
-  if (ocrPhotoURL) URL.revokeObjectURL(ocrPhotoURL);
-  ocrPhotoURL = URL.createObjectURL(file);
-  $('#ocr-photo').src = ocrPhotoURL;
-  $('#ocr-photo').hidden = false;
+/* ——— Recadrage ——— */
+function openCropper(file) {
+  if (ocr.url) URL.revokeObjectURL(ocr.url);
+  ocr.url = URL.createObjectURL(file);
+  ocr.box = { x: 0.06, y: 0.22, w: 0.88, h: 0.56 };
+  showCropper();
+}
 
-  ocrStatus('Préparation de la photo…');
+function showCropper() {
+  const img = $('#crop-img');
+  $('#cropper').hidden = false;
+  document.documentElement.classList.add('cropping');
+  const ready = () => { layoutCrop(); warmOcr(); };
+  if (img.getAttribute('src') === ocr.url && img.complete && img.naturalWidth) {
+    ready();
+    return;
+  }
+  img.onload = ready;
+  img.onerror = () => {
+    closeCropper();
+    toast('Impossible d’ouvrir cette photo — essayez-en une autre.');
+  };
+  img.src = ocr.url;
+}
+
+function closeCropper() {
+  $('#cropper').hidden = true;
+  document.documentElement.classList.remove('cropping');
+  ocr.drag = null;
+}
+
+/* Position de la photo affichée (entière, centrée) dans la zone de recadrage. */
+function cropGeometry() {
+  const stage = $('#crop-stage');
+  const img = $('#crop-img');
+  const sw = stage.clientWidth;
+  const sh = stage.clientHeight;
+  const iw = img.naturalWidth || 1;
+  const ih = img.naturalHeight || 1;
+  const s = Math.min(sw / iw, sh / ih);
+  return { left: (sw - iw * s) / 2, top: (sh - ih * s) / 2, width: iw * s, height: ih * s };
+}
+
+function layoutCrop() {
+  if ($('#cropper').hidden || !ocr.box) return;
+  const g = cropGeometry();
+  const img = $('#crop-img');
+  img.style.left = g.left + 'px';
+  img.style.top = g.top + 'px';
+  img.style.width = g.width + 'px';
+  img.style.height = g.height + 'px';
+  const b = ocr.box;
+  const box = $('#crop-box');
+  box.style.left = g.left + b.x * g.width + 'px';
+  box.style.top = g.top + b.y * g.height + 'px';
+  box.style.width = b.w * g.width + 'px';
+  box.style.height = b.h * g.height + 'px';
+}
+
+/* Bords et coins pour redimensionner, intérieur pour déplacer, extérieur
+   pour tracer un nouveau cadre. La zone saisie est calculée ici plutôt que
+   par les poignées : sur un cadre fin, elles recouvriraient tout l'intérieur. */
+function cropHitMode(px, py, g) {
+  const GRAB = 24; // tolérance en px autour des bords
+  const b = ocr.box;
+  const L = b.x * g.width;
+  const R = (b.x + b.w) * g.width;
+  const T = b.y * g.height;
+  const B = (b.y + b.h) * g.height;
+  // À l'intérieur, la bande de saisie d'un bord ne dépasse pas le tiers du
+  // cadre : le centre reste toujours disponible pour le déplacer.
+  const tx = Math.min(GRAB, (R - L) / 3);
+  const ty = Math.min(GRAB, (B - T) / 3);
+  const inX = px > L - GRAB && px < R + GRAB;
+  const inY = py > T - GRAB && py < B + GRAB;
+  let v = '';
+  let h = '';
+  if (inX) {
+    const nearT = py > T - GRAB && py < T + ty;
+    const nearB = py > B - ty && py < B + GRAB;
+    if (nearT && nearB) v = Math.abs(py - T) <= Math.abs(py - B) ? 't' : 'b';
+    else v = nearT ? 't' : (nearB ? 'b' : '');
+  }
+  if (inY) {
+    const nearL = px > L - GRAB && px < L + tx;
+    const nearR = px > R - tx && px < R + GRAB;
+    if (nearL && nearR) h = Math.abs(px - L) <= Math.abs(px - R) ? 'l' : 'r';
+    else h = nearL ? 'l' : (nearR ? 'r' : '');
+  }
+  if (v || h) return v + h;
+  return px > L && px < R && py > T && py < B ? 'move' : 'new';
+}
+
+function bindCropper() {
+  const stage = $('#crop-stage');
+  const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
+  // Position du doigt en fraction de la photo (non bornée, pour les écarts).
+  const toNorm = (e, g) => {
+    const r = stage.getBoundingClientRect();
+    return { x: (e.clientX - r.left - g.left) / g.width, y: (e.clientY - r.top - g.top) / g.height };
+  };
+  stage.addEventListener('pointerdown', (e) => {
+    if (ocr.drag || !ocr.box) return;
+    const g = cropGeometry();
+    const p = toNorm(e, g);
+    const mode = cropHitMode(p.x * g.width, p.y * g.height, g);
+    ocr.drag = { id: e.pointerId, mode, start: p, box: { ...ocr.box } };
+    try { stage.setPointerCapture(e.pointerId); } catch { /* sans importance */ }
+    e.preventDefault();
+  });
+  stage.addEventListener('pointermove', (e) => {
+    const d = ocr.drag;
+    if (!d || e.pointerId !== d.id) return;
+    const p = toNorm(e, cropGeometry());
+    const dx = p.x - d.start.x;
+    const dy = p.y - d.start.y;
+    const o = d.box;
+    let x = o.x;
+    let y = o.y;
+    let x2 = o.x + o.w;
+    let y2 = o.y + o.h;
+    if (d.mode === 'move') {
+      x = clamp(o.x + dx, 0, 1 - o.w);
+      y = clamp(o.y + dy, 0, 1 - o.h);
+      x2 = x + o.w;
+      y2 = y + o.h;
+    } else if (d.mode === 'new') {
+      const sx = clamp(d.start.x, 0, 1);
+      const sy = clamp(d.start.y, 0, 1);
+      const ex = clamp(p.x, 0, 1);
+      const ey = clamp(p.y, 0, 1);
+      x = Math.min(sx, ex);
+      x2 = Math.max(sx, ex);
+      y = Math.min(sy, ey);
+      y2 = Math.max(sy, ey);
+    } else {
+      // Le bord suit le doigt de l'écart parcouru (pas de saut initial).
+      if (d.mode.includes('l')) x = clamp(o.x + dx, 0, x2 - CROP_MIN);
+      if (d.mode.includes('r')) x2 = clamp(o.x + o.w + dx, x + CROP_MIN, 1);
+      if (d.mode.includes('t')) y = clamp(o.y + dy, 0, y2 - CROP_MIN);
+      if (d.mode.includes('b')) y2 = clamp(o.y + o.h + dy, y + CROP_MIN, 1);
+    }
+    ocr.box = { x, y, w: x2 - x, h: y2 - y };
+    layoutCrop();
+  });
+  const end = (e) => {
+    const d = ocr.drag;
+    if (!d || e.pointerId !== d.id) return;
+    // Cadre trop petit (simple toucher hors du cadre) : on garde l'ancien.
+    if (ocr.box.w < CROP_MIN || ocr.box.h < CROP_MIN) ocr.box = d.box;
+    ocr.drag = null;
+    layoutCrop();
+  };
+  stage.addEventListener('pointerup', end);
+  stage.addEventListener('pointercancel', end);
+  window.addEventListener('resize', layoutCrop);
+}
+
+function readCrop() {
+  const img = $('#crop-img');
+  if (!img.naturalWidth || !ocr.box) return;
+  const W = img.naturalWidth;
+  const H = img.naturalHeight;
+  const b = ocr.box;
+  const x = Math.min(W - 1, Math.max(0, Math.round(b.x * W)));
+  const y = Math.min(H - 1, Math.max(0, Math.round(b.y * H)));
+  const rect = {
+    x, y,
+    w: Math.max(1, Math.min(W - x, Math.round(b.w * W))),
+    h: Math.max(1, Math.min(H - y, Math.round(b.h * H)))
+  };
+  closeCropper();
+  runOCR(img, rect);
+}
+
+/* ——— Prétraitement ———
+   1. recadrage à la résolution native (plafonnée à 3000 px : mémoire iPhone) ;
+   2. niveaux de gris + léger flou (2 × 3×3) pour gommer le grain du capteur ;
+   3. agrandissement des petits recadrages vers ~1800 px (petits caractères) ;
+   4. binarisation adaptative locale (moyenne par zone via image intégrale),
+      qui neutralise l'ombre de la reliure et l'éclairage inégal. */
+
+const makeCanvas = (w, h) => Object.assign(document.createElement('canvas'), { width: w, height: h });
+
+function canvasBlob(canvas, type, quality) {
+  return new Promise((resolve, reject) => {
+    canvas.toBlob((b) => (b ? resolve(b) : reject(new Error('toBlob'))), type, quality);
+  });
+}
+
+/* iOS plafonne la mémoire totale des canvas : on les vide après usage. */
+function releaseCanvas(c) { c.width = 0; c.height = 0; }
+
+function boxBlur3(src, w, h) {
+  const tmp = new Uint8ClampedArray(src.length);
+  for (let y = 0; y < h; y++) {
+    const row = y * w;
+    for (let x = 0; x < w; x++) {
+      tmp[row + x] = (src[row + Math.max(0, x - 1)] + src[row + x] + src[row + Math.min(w - 1, x + 1)]) / 3;
+    }
+  }
+  for (let y = 0; y < h; y++) {
+    const up = Math.max(0, y - 1) * w;
+    const mid = y * w;
+    const dn = Math.min(h - 1, y + 1) * w;
+    for (let x = 0; x < w; x++) src[mid + x] = (tmp[up + x] + tmp[mid + x] + tmp[dn + x]) / 3;
+  }
+}
+
+async function preprocessCrop(img, r) {
+  const MAX_SIDE = 3000;
+  const TARGET = 1800;
+  const s1 = Math.min(1, MAX_SIDE / Math.max(r.w, r.h));
+  const w1 = Math.max(1, Math.round(r.w * s1));
+  const h1 = Math.max(1, Math.round(r.h * s1));
+  const c1 = makeCanvas(w1, h1);
+  const x1 = c1.getContext('2d', { willReadFrequently: true });
+  x1.drawImage(img, r.x, r.y, r.w, r.h, 0, 0, w1, h1);
+  const preview = await canvasBlob(c1, 'image/jpeg', 0.85);
+
+  let data = x1.getImageData(0, 0, w1, h1);
+  let gray = new Uint8ClampedArray(w1 * h1);
+  for (let i = 0, j = 0; j < gray.length; i += 4, j++) {
+    gray[j] = (data.data[i] * 299 + data.data[i + 1] * 587 + data.data[i + 2] * 114) / 1000;
+  }
+  boxBlur3(gray, w1, h1);
+  boxBlur3(gray, w1, h1);
+
+  let W = w1;
+  let H = h1;
+  let out = c1;
+  let ctx = x1;
+  const k = Math.min(3, TARGET / Math.max(w1, h1));
+  if (k > 1.05) {
+    for (let i = 0, j = 0; j < gray.length; i += 4, j++) {
+      data.data[i] = data.data[i + 1] = data.data[i + 2] = gray[j];
+    }
+    x1.putImageData(data, 0, 0);
+    W = Math.round(w1 * k);
+    H = Math.round(h1 * k);
+    out = makeCanvas(W, H);
+    ctx = out.getContext('2d', { willReadFrequently: true });
+    ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(c1, 0, 0, W, H);
+    releaseCanvas(c1);
+    data = ctx.getImageData(0, 0, W, H);
+    gray = new Uint8ClampedArray(W * H);
+    for (let i = 0, j = 0; j < gray.length; i += 4, j++) gray[j] = data.data[i];
+  }
+
+  // Image intégrale (Uint32 suffit : 3000 × 3000 × 255 < 2³²)
+  const stride = W + 1;
+  const integ = new Uint32Array(stride * (H + 1));
+  for (let y = 0; y < H; y++) {
+    let rowSum = 0;
+    for (let x = 0; x < W; x++) {
+      rowSum += gray[y * W + x];
+      integ[(y + 1) * stride + x + 1] = integ[y * stride + x + 1] + rowSum;
+    }
+  }
+  // Noir si nettement plus sombre que la moyenne de son voisinage.
+  const rad = Math.max(12, Math.round(Math.max(W, H) / 40));
+  const px = data.data;
+  for (let y = 0; y < H; y++) {
+    const y0 = Math.max(0, y - rad);
+    const y1 = Math.min(H - 1, y + rad);
+    for (let x = 0; x < W; x++) {
+      const x0 = Math.max(0, x - rad);
+      const x1b = Math.min(W - 1, x + rad);
+      const area = (y1 - y0 + 1) * (x1b - x0 + 1);
+      const sum = integ[(y1 + 1) * stride + x1b + 1] - integ[y0 * stride + x1b + 1]
+        - integ[(y1 + 1) * stride + x0] + integ[y0 * stride + x0];
+      const v = gray[y * W + x] * area * 100 < sum * 85 ? 0 : 255;
+      const o = (y * W + x) * 4;
+      px[o] = px[o + 1] = px[o + 2] = v;
+      px[o + 3] = 255;
+    }
+  }
+  ctx.putImageData(data, 0, 0);
+  const blob = await canvasBlob(out, 'image/png');
+  releaseCanvas(out);
+  releaseCanvas(c1);
+  return { blob, preview };
+}
+
+/* ——— Lecture ——— */
+async function runOCR(img, rect) {
+  // Chaque lecture a son numéro : un nouveau scan ou une annulation rend
+  // caduque la lecture précédente, dont le résultat est alors ignoré.
+  const run = ++ocr.run;
+  const stale = () => run !== ocr.run;
+  const panel = $('#ocr-panel');
+  panel.hidden = false;
+  $('#ocr-lines').innerHTML = '';
+  $('#ocr-actions').hidden = true;
+  setOcrStatus('Préparation de l’image…', true);
+  panel.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+
+  let step = 'prep';
   try {
-    const image = await prepareImageForOCR(file);
+    const { blob, preview } = await preprocessCrop(img, rect);
+    if (stale()) return;
+    if (ocr.previewURL) URL.revokeObjectURL(ocr.previewURL);
+    ocr.previewURL = URL.createObjectURL(preview);
+    const previewEl = $('#ocr-preview');
+    previewEl.src = ocr.previewURL;
+    previewEl.hidden = false;
+
+    step = 'engine';
+    setOcrStatus('Démarrage du moteur de lecture…', true);
     const worker = await getOcrWorker();
-    ocrStatus('Reconnaissance…');
-    const { data } = await worker.recognize(image);
-    const lines = data.text.split('\n').map((l) => l.trim()).filter(Boolean);
+    if (stale()) return;
+
+    step = 'read';
+    setOcrStatus('Lecture du passage…', true);
+    ocrProgress = (p) => { if (!stale()) setOcrStatus(`Lecture du passage… ${Math.round(p * 100)} %`, true); };
+    const { data } = await worker.recognize(blob);
+    if (stale()) return; // scan annulé ou remplacé entre-temps
+    ocrProgress = null;
+
+    const lines = data.text.split('\n').map((l) => l.replace(/\s+/g, ' ').trim()).filter(Boolean);
     if (!lines.length) {
-      ocrStatus('Aucun texte reconnu. Cadrez le passage seul, de près, bien à plat et avec de la lumière.');
+      setOcrStatus('Aucun texte trouvé dans le cadre. Recadrez au plus près du passage, sur une photo nette et bien éclairée.');
+      showOcrActions(false);
       return;
     }
-    if (data.confidence && data.confidence < 60) {
-      ocrStatus('Reconnaissance incertaine — pour un meilleur résultat, cadrez le passage seul, de près, à plat et bien éclairé.'
-        + (IS_IOS ? ' Vous pouvez aussi sélectionner le texte directement sur la photo (appui long).' : ''));
-    } else {
-      ocrStatus('Touchez une ligne pour l’inclure ou l’exclure, puis insérez.');
-    }
+    const tip = IS_IOS ? ' Astuce : un appui long sur la photo permet aussi d’en copier le texte.' : '';
+    setOcrStatus(data.confidence && data.confidence < 60
+      ? 'Lecture incertaine : vérifiez les lignes, ou recadrez plus serré.' + tip
+      : 'Touchez une ligne pour l’exclure ou la reprendre, puis insérez.');
     // Les débris (bords de page, taches) sont désélectionnés d'office.
     const looksJunk = (l) => {
       const letters = (l.match(/\p{L}/gu) || []).length;
@@ -1079,19 +1816,60 @@ async function runOCR(file) {
     };
     $('#ocr-lines').innerHTML = lines.map((l) =>
       `<button type="button" class="ocr-line${looksJunk(l) ? '' : ' on'}">${esc(l)}</button>`).join('');
-    $('#ocr-actions').hidden = false;
+    showOcrActions(true);
   } catch {
-    ocrStatus('Échec de la reconnaissance. Réessayez avec une photo plus nette.');
+    if (step === 'read') resetOcrWorker();
+    if (stale()) return;
+    ocrProgress = null;
+    setOcrStatus(step === 'engine'
+      ? 'Le moteur de lecture n’a pas pu démarrer. Au tout premier scan, une connexion est nécessaire ; réessayez.'
+      : 'Échec de la lecture. Réessayez avec une photo plus nette.');
+    showOcrActions(false);
   }
 }
 
+function showOcrActions(hasLines) {
+  $('#ocr-actions').hidden = false;
+  $('#ocr-insert').hidden = !hasLines;
+}
+
+/* Recolle les lignes : mot coupé en fin de ligne → mot entier, sauf mots
+   composés (« elle-même », « peut-être », « Jean-Paul », « a-t-il »…). */
+const HYPHEN_KEEP_NEXT = new Set(['même', 'mêmes', 'être', 'dessus', 'dessous', 'delà', 'deçà', 'dedans', 'dehors',
+  'devant', 'derrière', 'ci', 'là', 'bas', 'haut', 'moi', 'toi', 'lui', 'soi', 'nous', 'vous', 'elle', 'elles', 'il',
+  'ils', 'on', 'en', 'y', 'le', 'la', 'uns', 'unes', 't', 'midi', 'mère', 'père', 'frère', 'sœur', 'fils', 'fille', 'chose']);
+const HYPHEN_KEEP_PREV = new Set(['à', 'grand', 'demi', 'arrière', 'avant', 'vice', 'chef', 'nord', 'sud']);
+
+function cleanOcrText(lines) {
+  let out = '';
+  for (const raw of lines) {
+    const line = raw.replace(/\s+/g, ' ').trim();
+    if (!line) continue;
+    if (!out) { out = line; continue; }
+    const cut = out.match(/([\p{L}\p{N}’']+)[-\u2010\u2011\u00AD¬]$/u); // trait d'union, césure
+    if (cut && /^[\p{L}\p{N}]/u.test(line)) {
+      const prev = cut[1].toLowerCase().replace(/'/g, '’').split('’').pop();
+      const next = (line.match(/^[\p{L}’']+/u) || [''])[0].toLowerCase().replace(/'/g, '’');
+      const keep = /^[\p{Lu}\p{N}]/u.test(line) || /\p{N}$/u.test(prev)
+        || HYPHEN_KEEP_NEXT.has(next) || HYPHEN_KEEP_NEXT.has(next.split('’')[0])
+        || HYPHEN_KEEP_PREV.has(prev);
+      out = out.slice(0, -1) + (keep ? '-' : '') + line;
+    } else {
+      out += ' ' + line;
+    }
+  }
+  return out.replace(/'/g, '’').replace(/ {2,}/g, ' ');
+}
+
 function insertOcrSelection() {
-  const selected = $$('#ocr-lines .ocr-line.on').map((b) => b.textContent.trim());
+  const selected = $$('#ocr-lines .ocr-line.on').map((b) => b.textContent);
   if (!selected.length) { toast('Aucune ligne sélectionnée'); return; }
   const ta = $('#form-quote').text;
-  const text = selected.join(' ');
+  const text = cleanOcrText(selected);
   ta.value = ta.value.trim() ? ta.value.trim() + '\n' + text : text;
   closeOcrPanel();
+  saveDraft('quote');
+  ta.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
 }
 
 /* ═══════════ ÉVÉNEMENTS ═══════════ */
@@ -1101,40 +1879,69 @@ function bindEvents() {
 
   // Bibliothèque
   $('#btn-add-book').addEventListener('click', () => openBookForm());
-  $('#search-input').addEventListener('input', (e) => { state.query = e.target.value; renderLibrary(); });
+  $('#search-input').addEventListener('input', (e) => { state.query = e.target.value; refresh(renderLibrary); });
   $('#library-tags').addEventListener('click', (e) => {
     const chip = e.target.closest('.chip');
     if (!chip) return;
     state.libraryTag = state.libraryTag === chip.dataset.tag ? null : chip.dataset.tag;
-    renderLibrary();
+    refresh(renderLibrary);
   });
   $('#library-list').addEventListener('click', (e) => {
     const card = e.target.closest('.book-card');
     if (card) navigate('#/book/' + card.dataset.id);
   });
+  // La touche « Rechercher » du clavier le referme.
+  $$('input[type="search"]').forEach((input) => input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') input.blur();
+  }));
 
-  // Citations (vue globale)
+  // Citation rapide
+  $('#fab-quote').addEventListener('click', quickQuote);
+  $('#pick-list').addEventListener('click', (e) => {
+    const row = e.target.closest('.pick-row');
+    if (row) openQuoteForm(null, row.dataset.id);
+  });
+
+  // Citations (vue globale) : toucher = modifier, titre = aller au livre
   $('#quotes-search').addEventListener('input', (e) => {
     state.quotesQuery = e.target.value;
-    renderQuotesView();
+    refresh(renderQuotesView);
   });
   $('#quotes-book-filter').addEventListener('change', (e) => {
     state.quotesBook = e.target.value;
     state.quotesTag = null;
-    renderQuotesView();
+    refresh(renderQuotesView);
   });
   $('#quotes-tags').addEventListener('click', (e) => {
     const chip = e.target.closest('.chip');
     if (!chip) return;
     state.quotesTag = state.quotesTag === chip.dataset.tag ? null : chip.dataset.tag;
-    renderQuotesView();
+    refresh(renderQuotesView);
   });
-  $('#quotes-list').addEventListener('click', (e) => {
-    const card = e.target.closest('.quote-card');
-    if (!card) return;
-    state.bookTab = 'quotes';
-    navigate('#/book/' + card.dataset.book);
-  });
+
+  // Notes et citations : toucher pour modifier, glisser pour supprimer
+  for (const list of [$('#quotes-list'), $('#book-tab-content')]) {
+    bindSwipeToDelete(list);
+    list.addEventListener('click', (e) => {
+      if (Date.now() - swipeEndedAt < 450) return;
+      const source = e.target.closest('.qsource');
+      if (source) {
+        state.bookTab = 'quotes';
+        state.currentBookId = source.dataset.book;
+        navigate('#/book/' + source.dataset.book);
+        return;
+      }
+      const card = e.target.closest('.swipeable');
+      if (card) openEntry(card.dataset.kind, card.dataset.id);
+    });
+    list.addEventListener('keydown', (e) => {
+      const card = e.target.closest('.swipeable');
+      if (card && (e.key === 'Enter' || e.key === ' ')) {
+        e.preventDefault();
+        openEntry(card.dataset.kind, card.dataset.id);
+      }
+    });
+  }
 
   // Fiche livre
   $('#btn-back').addEventListener('click', () => history.length > 1 ? history.back() : navigate('#/library'));
@@ -1143,28 +1950,11 @@ function bindEvents() {
     const btn = e.target.closest('.seg-btn');
     if (!btn) return;
     state.bookTab = btn.dataset.tab;
-    renderBook();
+    refresh(renderBook);
   });
-  $('#btn-add-entry').addEventListener('click', () => state.bookTab === 'notes' ? openNoteForm() : openQuoteForm());
+  $('#btn-add-quote').addEventListener('click', () => openQuoteForm(null, state.currentBookId));
+  $('#btn-add-note').addEventListener('click', () => openNoteForm(null, state.currentBookId));
   $('#btn-export-book').addEventListener('click', () => exportMarkdown(bookById(state.currentBookId)));
-  $('#book-tab-content').addEventListener('click', async (e) => {
-    const editN = e.target.closest('.n-edit');
-    const delN = e.target.closest('.n-del');
-    const editQ = e.target.closest('.q-edit');
-    const delQ = e.target.closest('.q-del');
-    if (editN) openNoteForm(state.notes.find((n) => n.id === editN.dataset.id));
-    if (editQ) openQuoteForm(state.quotes.find((q) => q.id === editQ.dataset.id));
-    if (delN && confirm('Supprimer cette note ?')) {
-      await db.remove('notes', delN.dataset.id);
-      state.notes = state.notes.filter((n) => n.id !== delN.dataset.id);
-      render();
-    }
-    if (delQ && confirm('Supprimer cette citation ?')) {
-      await db.remove('quotes', delQ.dataset.id);
-      state.quotes = state.quotes.filter((q) => q.id !== delQ.dataset.id);
-      render();
-    }
-  });
 
   // Stats / données
   $('#btn-export-md').addEventListener('click', () => {
@@ -1181,7 +1971,19 @@ function bindEvents() {
   });
 
   // Feuilles modales
-  $('#backdrop').addEventListener('click', closeSheet);
+  $('#backdrop').addEventListener('click', () => closeSheet());
+  $$('[data-cancel]').forEach((b) => b.addEventListener('click', () => closeSheet({ discard: true })));
+  $$('.sheet').forEach(bindSheetDrag);
+  $$('[data-clear-draft]').forEach((b) => b.addEventListener('click', () => {
+    const kind = b.dataset.clearDraft;
+    if (!draftBase[kind]) return;
+    writeEntryForm(kind, draftBase[kind]);
+    try { localStorage.removeItem(draftKey(kind)); } catch { /* rien à faire */ }
+    $(`#${kind}-draft`).hidden = true;
+  }));
+  $('#form-note').addEventListener('input', () => scheduleDraftSave('note'));
+  $('#form-quote').addEventListener('input', () => scheduleDraftSave('quote'));
+
   $('#field-type').addEventListener('click', (e) => {
     const b = e.target.closest('.seg-btn');
     if (!b) return;
@@ -1203,10 +2005,27 @@ function bindEvents() {
     state.form.rating = state.form.rating === v ? 0 : v;
     syncRatingUI();
   });
+  $('#book-more-btn').addEventListener('click', () => setBookDetails($('#book-more').hidden));
+  bindTagSuggest($('#form-book').tags, $('#book-tag-suggest'), bookTagPool);
+  bindTagSuggest($('#form-quote').tags, $('#quote-tag-suggest'), quoteTagPool);
   $('#form-book').addEventListener('submit', saveBookForm);
   $('#btn-delete-book').addEventListener('click', deleteCurrentBook);
   $('#form-note').addEventListener('submit', saveNoteForm);
+  $('#btn-delete-note').addEventListener('click', () => {
+    const id = state.editing.noteId;
+    closeSheet({ discard: true });
+    if (id) deleteNote(id);
+  });
   $('#form-quote').addEventListener('submit', saveQuoteForm);
+  $('#btn-delete-quote').addEventListener('click', () => {
+    const id = state.editing.quoteId;
+    closeSheet({ discard: true });
+    if (id) deleteQuote(id);
+  });
+  // La page pré-remplie se remplace d'un geste : tout est sélectionné.
+  $('#form-quote').page.addEventListener('focus', (e) => {
+    setTimeout(() => { try { e.target.select(); } catch { /* champ numérique */ } }, 0);
+  });
 
   // Dictée & scan
   const dictateQuoteBtn = $('#btn-dictate-quote');
@@ -1218,24 +2037,46 @@ function bindEvents() {
   }
   dictateQuoteBtn.addEventListener('click', () => toggleDictation($('#form-quote').text, dictateQuoteBtn));
   dictateNoteBtn.addEventListener('click', () => toggleDictation($('#form-note').text, dictateNoteBtn));
-  $('#btn-scan-quote').addEventListener('click', openScanChooser);
-  $('#scan-native').addEventListener('click', startNativeScan);
-  $('#scan-photo').addEventListener('click', () => { $('#ocr-choice').hidden = true; $('#ocr-file').click(); });
-  $('#ocr-file').addEventListener('change', (e) => {
-    const file = e.target.files[0];
-    e.target.value = '';
-    if (file) runOCR(file);
-  });
+  $('#btn-scan-camera').addEventListener('click', () => { stopDictation(); $('#ocr-camera').click(); });
+  $('#btn-scan-gallery').addEventListener('click', () => { stopDictation(); $('#ocr-file').click(); });
+  for (const input of [$('#ocr-camera'), $('#ocr-file')]) {
+    input.addEventListener('change', (e) => {
+      const file = e.target.files[0];
+      e.target.value = '';
+      if (file) openCropper(file);
+    });
+  }
+  bindCropper();
+  $('#crop-cancel').addEventListener('click', closeCropper);
+  $('#crop-all').addEventListener('click', () => { ocr.box = { x: 0, y: 0, w: 1, h: 1 }; layoutCrop(); });
+  $('#crop-ok').addEventListener('click', readCrop);
   $('#ocr-lines').addEventListener('click', (e) => {
     const line = e.target.closest('.ocr-line');
     if (line) line.classList.toggle('on');
   });
   $('#ocr-insert').addEventListener('click', insertOcrSelection);
+  $('#ocr-recrop').addEventListener('click', () => { if (ocr.url) showCropper(); });
   $('#ocr-cancel').addEventListener('click', closeOcrPanel);
 
-  document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape') closeSheet();
+  // Toast : bouton « Annuler »
+  $('#toast-action').addEventListener('click', () => {
+    const action = toastAction;
+    hideToast();
+    if (action) action.run();
   });
+
+  document.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape') return;
+    if (!$('#cropper').hidden) closeCropper();
+    else closeSheet();
+  });
+
+  // Clavier iOS : la feuille suit la zone visible.
+  if (window.visualViewport) {
+    visualViewport.addEventListener('resize', syncViewport);
+    visualViewport.addEventListener('scroll', syncViewport);
+    syncViewport();
+  }
 
   // Verrouille le zoom par pincement sur iOS (Safari ignore user-scalable=no).
   document.addEventListener('gesturestart', (e) => e.preventDefault(), { passive: false });
@@ -1271,12 +2112,16 @@ async function init() {
         });
       })
       .catch(() => {});
-    // Recharge automatiquement quand une nouvelle version prend le contrôle
-    // (sauf à la toute première installation).
+    // Nouvelle version aux commandes : rechargement, mais pas pendant une
+    // saisie (sauf à la toute première installation, où rien ne change).
     let hadController = Boolean(navigator.serviceWorker.controller);
     navigator.serviceWorker.addEventListener('controllerchange', () => {
-      if (hadController) location.reload();
-      hadController = true;
+      if (!hadController) { hadController = true; return; }
+      updatePending = true;
+      applyPendingUpdate();
+    });
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'hidden') applyPendingUpdate();
     });
   }
 }
