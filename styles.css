@@ -499,16 +499,14 @@ input, select, textarea { font: inherit; color: inherit; }
 .dico-links { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
 .dico-links:empty { display: none; }
 .dico-link {
-  font-size: 13px; font-weight: 600;
-  padding: 5px 11px;
+  font-size: 13.5px; font-weight: 600;
+  padding: 6px 13px;
   border-radius: 999px;
-  background: var(--track);
+  background: var(--accent-soft);
   color: var(--accent);
   text-decoration: none;
 }
-.dico-link.preferred { background: var(--accent); color: #fff; }
 .dico-link:active { opacity: .6; }
-.dico-label { font-size: 12.5px; color: var(--muted); align-self: center; margin-right: 2px; }
 
 /* Suggestions pendant la frappe : tout reste visible, « Ajouter » compris */
 .word-suggest {
@@ -814,8 +812,6 @@ input[type="date"]::-webkit-date-and-time-value { text-align: left; }
 .field-row .field-page { flex: 0 0 34%; }
 
 .filters-row { margin-bottom: 12px; }
-.filters-row.two { display: flex; gap: 8px; }
-.filters-row.two select { flex: 1; min-width: 0; }
 .field select, .filters-row select {
   font-weight: 600;
   color: var(--ink);

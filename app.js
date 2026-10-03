@@ -1,7 +1,7 @@
 import * as db from './db.js';
 
 /* Synchroniser avec VERSION dans sw.js à chaque mise à jour. */
-const APP_VERSION = '12';
+const APP_VERSION = '13';
 
 /* ——— État en mémoire (rechargé depuis IndexedDB au démarrage) ——— */
 const state = {
@@ -1127,33 +1127,12 @@ function bindSwipeToDelete(container) {
    vient du Wiktionnaire, le seul grand dictionnaire français qu'une app a
    le droit d'interroger (CNRTL, Larousse et Le Robert le bloquent) ; elle
    est enregistrée avec le mot, donc lisible hors ligne. Un bouton ouvre le
-   mot dans le dictionnaire préféré. */
+   mot sur le CNRTL, et « Coller » reprend la définition copiée là-bas. */
 
-const DICTIONARIES = {
-  cnrtl: { label: 'CNRTL', url: (w) => 'https://www.cnrtl.fr/definition/' + encodeURIComponent(w) },
-  larousse: { label: 'Larousse', url: (w) => 'https://www.larousse.fr/dictionnaires/francais/' + encodeURIComponent(w) },
-  robert: { label: 'Le Robert', url: (w) => 'https://dictionnaire.lerobert.com/definition/' + robertSlug(w) },
-  wiktionnaire: { label: 'Wiktionnaire', url: (w) => 'https://fr.wiktionary.org/wiki/' + encodeURIComponent(w.replace(/ /g, '_')) }
-};
-const DICO_KEY = 'lecture-dico';
+const cnrtlURL = (word) => 'https://www.cnrtl.fr/definition/' + encodeURIComponent(word.trim());
+// Larousse et Le Robert : définitions collées avec une version précédente.
+const SOURCE_LABELS = { wiktionnaire: 'Wiktionnaire', perso: 'votre définition', cnrtl: 'CNRTL', larousse: 'Larousse', robert: 'Le Robert' };
 const WORDS_SORT_KEY = 'lecture-tri-mots';
-
-/* Le Robert range ses pages sous un identifiant sans accents. */
-function robertSlug(w) {
-  return normWord(w).replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
-}
-
-function preferredDico() {
-  let k = null;
-  try { k = localStorage.getItem(DICO_KEY); } catch { /* stockage bloqué */ }
-  return DICTIONARIES[k] ? k : 'cnrtl';
-}
-
-function setPreferredDico(k) {
-  try { localStorage.setItem(DICO_KEY, k); } catch { /* sans importance */ }
-}
-
-const dicoURL = (word, key = preferredDico()) => DICTIONARIES[key].url(word.trim());
 
 /* ——— Définitions du Wiktionnaire ——— */
 const WIKT_API = 'https://fr.wiktionary.org/w/api.php';
@@ -1377,7 +1356,7 @@ function wordCard(w, i, showBook = true) {
     <article class="card word-card swipeable" data-kind="word" data-id="${w.id}" tabindex="0" aria-label="${esc(w.text)} — toucher pour ouvrir">
       <div class="word-top">
         <h3 class="word-text">${esc(w.text)}</h3>
-        <a class="dico-quick" data-dico="${preferredDico()}" href="${esc(dicoURL(w.text))}" target="_blank" rel="noopener">${esc(DICTIONARIES[preferredDico()].label)} ↗</a>
+        <a class="dico-quick" data-dico="cnrtl" href="${esc(cnrtlURL(w.text))}" target="_blank" rel="noopener">CNRTL ↗</a>
       </div>
       <p class="word-def${prev.muted ? ' muted' : ''}">${prev.html}</p>
       ${w.context ? `<p class="word-ctx">« ${esc(cleanContext(w.context))} »</p>` : ''}
@@ -1402,7 +1381,6 @@ function renderWordsView() {
     + ids.map(bookById).sort((a, b) => a.title.localeCompare(b.title, 'fr'))
       .map((b) => `<option value="${b.id}" ${state.wordsBook === b.id ? 'selected' : ''}>${esc(b.title)}</option>`).join('')
     + (hasLoose ? `<option value="none" ${state.wordsBook === 'none' ? 'selected' : ''}>Sans livre</option>` : '');
-  $('#dico-select').value = preferredDico();
   $$('#words-sort .chip').forEach((c) => c.classList.toggle('active', c.dataset.sort === state.wordsSort));
 
   const listEl = $('#words-list');
@@ -1467,14 +1445,13 @@ function renderWordsView() {
 
 /* ——— Fiche d'un mot ——— */
 /* source : d'où vient le texte de la définition — 'wiktionnaire' (trouvée
-   automatiquement), 'perso' (écrite à la main) ou la clé d'un dictionnaire
-   (collée depuis son site). Seule une définition du Wiktionnaire peut être
-   remplacée par une nouvelle recherche automatique. */
+   automatiquement), 'perso' (écrite à la main) ou 'cnrtl' (collée depuis
+   le CNRTL). Seule une définition du Wiktionnaire peut être remplacée par
+   une nouvelle recherche automatique. */
 const wl = { timer: null, run: 0, found: null, notFound: '', openedDef: '', source: '', lastDico: '' };
 const ws = { timer: null, run: 0, list: [], hidden: true }; // suggestions pendant la frappe
 
-const sourceLabel = (src) => (src === 'wiktionnaire' ? 'Wiktionnaire'
-  : (src === 'perso' ? 'votre définition' : (DICTIONARIES[src] ? DICTIONARIES[src].label : '')));
+const sourceLabel = (src) => SOURCE_LABELS[src] || '';
 
 /* Définition écrite ou collée par l'utilisateur : jamais écrasée d'office. */
 function manualDefinition() {
@@ -1512,12 +1489,10 @@ function setDefStatus(html, busy = false) {
 
 function setDefSource(text) { $('#def-source').textContent = text ? '· ' + text : ''; }
 
-function renderDicoLinks() {
+function renderCnrtlLink() {
   const term = $('#form-word').text.value.trim();
-  const pref = preferredDico();
-  const keys = [pref, ...Object.keys(DICTIONARIES).filter((k) => k !== pref)];
   $('#dico-links').innerHTML = term
-    ? '<span class="dico-label">Ouvrir dans</span>' + keys.map((k) => `<a class="dico-link${k === pref ? ' preferred' : ''}" data-dico="${k}" href="${esc(dicoURL(term, k))}" target="_blank" rel="noopener">${esc(DICTIONARIES[k].label)} ↗</a>`).join('')
+    ? `<a class="dico-link" data-dico="cnrtl" href="${esc(cnrtlURL(term))}" target="_blank" rel="noopener">Voir dans le CNRTL ↗</a>`
     : '';
 }
 
@@ -1685,7 +1660,7 @@ function useQuoteSelection() {
   syncWordBookUI(false);
   closeQuotePicker();
   updateDupHint();
-  renderDicoLinks();
+  renderCnrtlLink();
   runWordLookup(text);
 }
 
@@ -1727,7 +1702,7 @@ function openWordForm(word = null, bookId, opts = {}) {
   $('#sheet-word-title').textContent = word ? 'Modifier le mot' : 'Nouveau mot';
   setDefSource(sourceLabel(wl.source));
   setDefStatus(word && !word.definition && word.defStatus === 'none' ? 'Aucune définition trouvée sur le Wiktionnaire.' : '');
-  renderDicoLinks();
+  renderCnrtlLink();
   updateDupHint();
   $('#btn-delete-word').hidden = !word;
   syncFromQuoteButton();
@@ -2877,17 +2852,13 @@ function bindEvents() {
     state.wordsBook = e.target.value;
     refresh(renderWordsView);
   });
-  $('#dico-select').addEventListener('change', (e) => {
-    setPreferredDico(e.target.value);
-    refresh(renderWordsView);
-  });
 
   // Fiche d'un mot
   const wordForm = $('#form-word');
   wordForm.addEventListener('submit', saveWordForm);
   wordForm.text.addEventListener('input', () => {
     updateDupHint();
-    renderDicoLinks();
+    renderCnrtlLink();
     scheduleWordLookup();
     scheduleWordSuggest();
   });
@@ -2908,27 +2879,27 @@ function bindEvents() {
       wordForm.text.value = pick.dataset.pick;
       hideWordSuggest();
       updateDupHint();
-      renderDicoLinks();
+      renderCnrtlLink();
       runWordLookup(pick.dataset.pick);
       return;
     }
     if (e.target.closest('[data-add]')) saveWordForm(new Event('submit'));
   });
-  // Définition copiée sur le site d'un dictionnaire : un toucher pour la reprendre.
+  // Définition copiée sur le site du CNRTL : un toucher pour la reprendre.
   $('#def-paste').addEventListener('click', async () => {
     let text = '';
     try { text = (await navigator.clipboard.readText()) || ''; } catch { text = ''; }
     text = text.replace(/\r/g, '').replace(/[ \t]+/g, ' ').replace(/\n{3,}/g, '\n\n').trim();
     if (!text) {
-      toast('Copiez d’abord la définition sur le site du dictionnaire, puis touchez « Coller ».');
+      toast('Copiez d’abord la définition sur le site du CNRTL, puis touchez « Coller ».');
       return;
     }
     wordForm.definition.value = text;
-    wl.source = wl.lastDico || preferredDico();
+    wl.source = wl.lastDico === 'cnrtl' ? 'cnrtl' : 'perso';
     setDefSource(sourceLabel(wl.source));
     setDefStatus('');
   });
-  // Dernier dictionnaire ouvert : il devient la source d'une définition collée.
+  // CNRTL ouvert juste avant : la définition collée vient de là.
   document.addEventListener('click', (e) => {
     const a = e.target.closest('a[data-dico]');
     if (a) wl.lastDico = a.dataset.dico;
@@ -2963,7 +2934,7 @@ function bindEvents() {
     if (!b) return;
     wordForm.text.value = b.dataset.suggest;
     updateDupHint();
-    renderDicoLinks();
+    renderCnrtlLink();
     runWordLookup(b.dataset.suggest, true);
   });
   $('#word-dup').addEventListener('click', (e) => {
