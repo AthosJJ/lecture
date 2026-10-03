@@ -1,7 +1,7 @@
 import * as db from './db.js';
 
 /* Synchroniser avec VERSION dans sw.js à chaque mise à jour. */
-const APP_VERSION = '11';
+const APP_VERSION = '12';
 
 /* ——— État en mémoire (rechargé depuis IndexedDB au démarrage) ——— */
 const state = {
@@ -169,7 +169,6 @@ function render() {
   $('#tabbar').classList.toggle('hidden', r === 'book');
   $$('.tab').forEach((t) => t.classList.toggle('active', t.dataset.route === r));
   $('#book-actions').hidden = r !== 'book';
-  $('#fab-quote').hidden = !(r === 'quotes' && state.books.length > 0);
 
   if (r === 'library') { $('#view-library').classList.add('active'); renderLibrary(); }
   if (r === 'quotes') { $('#view-quotes').classList.add('active'); renderQuotesView(); }
@@ -580,7 +579,7 @@ function closeSheet({ discard = false, keepBackdrop = false } = {}) {
     else { saveDraft(kind); draftBase[kind] = null; }
   }
   if (sheet.id === 'sheet-quote') closeOcrPanel();
-  if (sheet.id === 'sheet-word') { clearTimeout(wl.timer); wl.run++; }
+  if (sheet.id === 'sheet-word') { clearTimeout(wl.timer); wl.run++; hideWordSuggest(); }
   if (sheet.contains(document.activeElement)) document.activeElement.blur();
 
   sheet.classList.remove('open', 'dragging');
@@ -970,6 +969,7 @@ function openQuoteForm(quote = null, bookId = null) {
   writeEntryForm('quote', draftBase.quote);
   restoreDraft('quote');
   $('#btn-delete-quote').hidden = !quote;
+  $('#quote-to-word').hidden = !quote;
   openSheet('#sheet-quote');
 }
 
@@ -982,6 +982,7 @@ async function saveQuoteForm(e) {
   if (!book) { closeSheet(); return; }
   const now = new Date().toISOString();
   let quote = state.editing.quoteId ? state.quotes.find((q) => q.id === state.editing.quoteId) : null;
+  const isNewQuote = !quote;
   if (quote) {
     quote.text = text;
     quote.updatedAt = now;
@@ -998,7 +999,8 @@ async function saveQuoteForm(e) {
   dropDraft('quote');
   closeSheet();
   if (state.route === 'book' && state.currentBookId === book.id) state.bookTab = 'quotes';
-  toast('Citation enregistrée' + progressNote(book, progressed));
+  toast('Citation enregistrée' + progressNote(book, progressed),
+    isNewQuote ? { label: 'Noter un mot', run: () => openWordFromQuote(quote) } : null);
   render();
 }
 
@@ -1039,7 +1041,7 @@ function openEntry(kind, id) {
   }
 }
 
-/* ——— Citation rapide : bouton flottant ——— */
+/* ——— Citation rapide : bouton + de l'onglet Citations ——— */
 function quickQuote() {
   if (!state.books.length) { openBookForm(); toast('Ajoutez d’abord un livre'); return; }
   if (state.route === 'quotes' && state.quotesBook && bookById(state.quotesBook)) {
@@ -1375,7 +1377,7 @@ function wordCard(w, i, showBook = true) {
     <article class="card word-card swipeable" data-kind="word" data-id="${w.id}" tabindex="0" aria-label="${esc(w.text)} — toucher pour ouvrir">
       <div class="word-top">
         <h3 class="word-text">${esc(w.text)}</h3>
-        <a class="dico-quick" href="${esc(dicoURL(w.text))}" target="_blank" rel="noopener">${esc(DICTIONARIES[preferredDico()].label)} ↗</a>
+        <a class="dico-quick" data-dico="${preferredDico()}" href="${esc(dicoURL(w.text))}" target="_blank" rel="noopener">${esc(DICTIONARIES[preferredDico()].label)} ↗</a>
       </div>
       <p class="word-def${prev.muted ? ' muted' : ''}">${prev.html}</p>
       ${w.context ? `<p class="word-ctx">« ${esc(cleanContext(w.context))} »</p>` : ''}
@@ -1464,7 +1466,20 @@ function renderWordsView() {
 }
 
 /* ——— Fiche d'un mot ——— */
-const wl = { timer: null, run: 0, touched: false, found: null, notFound: '', openedDef: '' };
+/* source : d'où vient le texte de la définition — 'wiktionnaire' (trouvée
+   automatiquement), 'perso' (écrite à la main) ou la clé d'un dictionnaire
+   (collée depuis son site). Seule une définition du Wiktionnaire peut être
+   remplacée par une nouvelle recherche automatique. */
+const wl = { timer: null, run: 0, found: null, notFound: '', openedDef: '', source: '', lastDico: '' };
+const ws = { timer: null, run: 0, list: [], hidden: true }; // suggestions pendant la frappe
+
+const sourceLabel = (src) => (src === 'wiktionnaire' ? 'Wiktionnaire'
+  : (src === 'perso' ? 'votre définition' : (DICTIONARIES[src] ? DICTIONARIES[src].label : '')));
+
+/* Définition écrite ou collée par l'utilisateur : jamais écrasée d'office. */
+function manualDefinition() {
+  return Boolean($('#form-word').definition.value.trim()) && wl.source !== 'wiktionnaire';
+}
 
 function fillBookSelect(select, selectedId) {
   const books = state.books.slice().sort((a, b) =>
@@ -1502,8 +1517,180 @@ function renderDicoLinks() {
   const pref = preferredDico();
   const keys = [pref, ...Object.keys(DICTIONARIES).filter((k) => k !== pref)];
   $('#dico-links').innerHTML = term
-    ? keys.map((k) => `<a class="dico-link${k === pref ? ' preferred' : ''}" href="${esc(dicoURL(term, k))}" target="_blank" rel="noopener">${esc(DICTIONARIES[k].label)} ↗</a>`).join('')
+    ? '<span class="dico-label">Ouvrir dans</span>' + keys.map((k) => `<a class="dico-link${k === pref ? ' preferred' : ''}" data-dico="${k}" href="${esc(dicoURL(term, k))}" target="_blank" rel="noopener">${esc(DICTIONARIES[k].label)} ↗</a>`).join('')
     : '';
+}
+
+/* ——— Suggestions pendant la frappe (Wiktionnaire, par début de mot) ——— */
+async function wiktPrefix(term) {
+  const url = `${WIKT_API}?action=opensearch&format=json&formatversion=2&origin=*&namespace=0&limit=8&search=${encodeURIComponent(term)}`;
+  const res = await fetch(url);
+  if (!res.ok) return [];
+  const data = await res.json();
+  return Array.isArray(data) && Array.isArray(data[1]) ? data[1] : [];
+}
+
+function renderWordSuggest() {
+  const box = $('#word-suggest');
+  const term = $('#form-word').text.value.trim();
+  if (ws.hidden || term.length < 2) { box.hidden = true; box.innerHTML = ''; return; }
+  const n = normWord(term);
+  const lower = term.toLowerCase();
+  // La dernière liste reçue, filtrée tout de suite sur ce qui est tapé.
+  const items = [...new Set(ws.list)].filter((t) => normWord(t).startsWith(n) && t.toLowerCase() !== lower).slice(0, 5);
+  const known = ws.list.some((t) => t.toLowerCase() === lower) || (wl.found && wl.found.title.toLowerCase() === lower);
+  box.innerHTML = items.map((t) => `<button type="button" class="chip" role="option" data-pick="${esc(t)}">${esc(t)}</button>`).join('')
+    + (known ? '' : `<button type="button" class="chip add" data-add>+ Ajouter « ${esc(term)} »</button>`);
+  box.hidden = !box.innerHTML;
+}
+
+function scheduleWordSuggest() {
+  clearTimeout(ws.timer);
+  ws.hidden = false;
+  renderWordSuggest();
+  const term = $('#form-word').text.value.trim();
+  if (term.length < 2 || !navigator.onLine) return;
+  ws.timer = setTimeout(async () => {
+    const run = ++ws.run;
+    let list;
+    try { list = await wiktPrefix(term); } catch { return; }
+    if (run !== ws.run) return;
+    ws.list = list;
+    renderWordSuggest();
+  }, 220);
+}
+
+function hideWordSuggest() {
+  clearTimeout(ws.timer);
+  ws.run++;
+  ws.hidden = true;
+  renderWordSuggest();
+}
+
+/* ——— Mot choisi dans une citation ———
+   Un toucher sur un mot le sélectionne, un second sur un autre mot étend
+   la sélection en expression ; la phrase devient le contexte. */
+const qp = { quote: null, tokens: [], a: -1, b: -1 };
+
+function tokenizeWords(text) {
+  const out = [];
+  const re = /[\p{L}\p{N}]+(?:-[\p{L}\p{N}]+)*/gu;
+  let m;
+  while ((m = re.exec(text))) out.push({ start: m.index, end: m.index + m[0].length });
+  return out;
+}
+
+function syncFromQuoteButton() {
+  $('#word-from-quote').hidden = state.quotes.length === 0 || !$('#qpick').hidden;
+}
+
+function openQuotePicker(quote = null) {
+  hideWordSuggest();
+  $('#qpick').hidden = false;
+  syncFromQuoteButton();
+  if (quote) showQuoteWords(quote); else showQuoteList();
+}
+
+function closeQuotePicker() {
+  $('#qpick').hidden = true;
+  qp.quote = null;
+  syncFromQuoteButton();
+}
+
+function showQuoteList() {
+  qp.quote = null;
+  const recent = (a, b) => b.createdAt.localeCompare(a.createdAt);
+  const bid = $('#form-word').bookId.value;
+  let quotes = state.quotes.filter((q) => q.bookId === bid).sort(recent);
+  if (!quotes.length) quotes = state.quotes.slice().sort(recent);
+  $('#qpick-title').textContent = 'Choisissez une citation';
+  $('#qpick-list').innerHTML = quotes.slice(0, 40).map((q) => {
+    const book = bookById(q.bookId);
+    const where = [book && book.title, quotePlace(q, book)].filter(Boolean).join(' · ');
+    return `<button type="button" class="qpick-item" data-id="${q.id}"><span class="qtext-mini">${esc(q.text)}</span>${where ? `<small>${esc(where)}</small>` : ''}</button>`;
+  }).join('');
+  $('#qpick-list').hidden = false;
+  $('#qpick-words').hidden = true;
+  $('#qpick-actions').hidden = true;
+}
+
+function showQuoteWords(quote) {
+  qp.quote = quote;
+  qp.tokens = tokenizeWords(quote.text);
+  qp.a = qp.b = -1;
+  $('#qpick-title').textContent = 'Touchez un mot, ou deux pour une expression';
+  let html = '';
+  let pos = 0;
+  qp.tokens.forEach((t, i) => {
+    html += esc(quote.text.slice(pos, t.start))
+      + `<button type="button" class="qw" data-i="${i}">${esc(quote.text.slice(t.start, t.end))}</button>`;
+    pos = t.end;
+  });
+  $('#qpick-words').innerHTML = html + esc(quote.text.slice(pos));
+  $('#qpick-list').hidden = true;
+  $('#qpick-words').hidden = false;
+  $('#qpick-actions').hidden = false;
+  $('#qpick-back').hidden = state.quotes.length < 2;
+  syncQuoteSelection();
+}
+
+function quoteSelectionText() {
+  if (!qp.quote || qp.a < 0) return '';
+  return qp.quote.text.slice(qp.tokens[qp.a].start, qp.tokens[qp.b].end);
+}
+
+function syncQuoteSelection() {
+  $$('#qpick-words .qw').forEach((b) => {
+    const i = Number(b.dataset.i);
+    b.classList.toggle('on', qp.a >= 0 && i >= qp.a && i <= qp.b);
+  });
+  const sel = quoteSelectionText();
+  const use = $('#qpick-use');
+  use.disabled = !sel;
+  use.textContent = sel ? `Choisir « ${sel.length > 38 ? sel.slice(0, 37) + '…' : sel} »` : 'Touchez un mot';
+}
+
+function onQuoteWordTap(i) {
+  if (qp.a < 0 || qp.a !== qp.b) qp.a = qp.b = i;   // premier mot (ou nouveau départ)
+  else if (i === qp.a) qp.a = qp.b = -1;            // même mot : désélection
+  else { qp.a = Math.min(qp.a, i); qp.b = Math.max(qp.b, i); } // second mot : expression
+  syncQuoteSelection();
+}
+
+/* Phrase qui contient la sélection (entre deux ponctuations fortes). */
+function sentenceAround(text, start, end) {
+  let s = start;
+  while (s > 0 && !/[.!?…]/.test(text[s - 1])) s--;
+  let e = end;
+  while (e < text.length && !/[.!?…]/.test(text[e])) e++;
+  while (e < text.length && /[.!?…»"”]/.test(text[e])) e++;
+  const raw = text.slice(s, e);
+  return { sentence: raw.trim(), start: s + raw.length - raw.trimStart().length };
+}
+
+function useQuoteSelection() {
+  const q = qp.quote;
+  if (!q || qp.a < 0) return;
+  const start = qp.tokens[qp.a].start;
+  const end = qp.tokens[qp.b].end;
+  let text = q.text.slice(start, end);
+  const { sentence, start: sStart } = sentenceAround(q.text, start, end);
+  // Majuscule de début de phrase : « Sibyllin » → « sibyllin »
+  if (start === sStart && /^\p{Lu}\p{Ll}/u.test(text)) text = text.charAt(0).toLocaleLowerCase('fr') + text.slice(1);
+  const form = $('#form-word');
+  form.text.value = text;
+  if (!form.context.value.trim()) form.context.value = sentence;
+  if (q.bookId && bookById(q.bookId)) form.bookId.value = q.bookId;
+  if (q.page != null && q.page !== '' && !isNaN(q.page)) form.page.value = q.page;
+  syncWordBookUI(false);
+  closeQuotePicker();
+  updateDupHint();
+  renderDicoLinks();
+  runWordLookup(text);
+}
+
+function openWordFromQuote(q) {
+  openWordForm(null, q.bookId, { quote: q });
 }
 
 function updateDupHint() {
@@ -1517,30 +1704,36 @@ function updateDupHint() {
     + `<button type="button" class="link-btn" data-open-word="${dup.id}">Voir</button>`;
 }
 
-function openWordForm(word = null, bookId) {
+function openWordForm(word = null, bookId, opts = {}) {
   const form = $('#form-word');
   form.reset();
   clearTimeout(wl.timer);
   wl.run++;
   wl.found = null;
   wl.notFound = '';
+  ws.list = [];
+  ws.hidden = true;
+  renderWordSuggest();
+  closeQuotePicker();
   state.editing.wordId = word ? word.id : null;
   fillBookSelect(form.bookId, word ? word.bookId : (bookId !== undefined ? bookId : defaultWordBook()));
   form.text.value = word ? word.text : '';
   form.definition.value = word ? (word.definition || '') : '';
   wl.openedDef = form.definition.value;
-  wl.touched = Boolean(word && word.definition && word.defSource === 'perso');
+  wl.source = word && word.definition ? (word.defSource || 'perso') : '';
   form.context.value = word ? (word.context || '') : '';
   form.page.value = word && word.page != null ? word.page : '';
   syncWordBookUI(!word);
   $('#sheet-word-title').textContent = word ? 'Modifier le mot' : 'Nouveau mot';
-  setDefSource(word && word.definition ? (word.defSource === 'perso' ? 'votre définition' : 'Wiktionnaire') : '');
+  setDefSource(sourceLabel(wl.source));
   setDefStatus(word && !word.definition && word.defStatus === 'none' ? 'Aucune définition trouvée sur le Wiktionnaire.' : '');
   renderDicoLinks();
   updateDupHint();
   $('#btn-delete-word').hidden = !word;
+  syncFromQuoteButton();
   openSheet('#sheet-word');
-  if (!word) form.text.focus({ preventScroll: true });
+  if (opts.quote) openQuotePicker(opts.quote);
+  else if (!word) form.text.focus({ preventScroll: true });
   else if (!word.definition && word.defStatus !== 'none') runWordLookup(word.text);
 }
 
@@ -1548,15 +1741,15 @@ function scheduleWordLookup() {
   clearTimeout(wl.timer);
   const term = $('#form-word').text.value.trim();
   if (!term) { wl.run++; setDefStatus(''); return; }
-  if (term.length < 2 || wl.touched) return;
+  if (term.length < 2 || manualDefinition()) return;
   wl.timer = setTimeout(() => runWordLookup(term), 650);
 }
 
 /* Cherche la définition pendant la saisie ; « force » (bouton Rechercher,
-   suggestion) remplace aussi une définition écrite à la main. */
+   suggestion d'orthographe) remplace aussi une définition écrite ou collée. */
 async function runWordLookup(term, force = false) {
   const form = $('#form-word');
-  if (wl.touched && !force) return;
+  if (manualDefinition() && !force) return;
   clearTimeout(wl.timer);
   const run = ++wl.run;
   if (!navigator.onLine) {
@@ -1570,16 +1763,18 @@ async function runWordLookup(term, force = false) {
     if (res) {
       wl.found = res;
       wl.notFound = '';
-      wl.touched = false;
+      wl.source = 'wiktionnaire';
       form.definition.value = res.text;
       setDefSource('Wiktionnaire');
       setDefStatus('');
+      renderWordSuggest();
       return;
     }
     wl.found = null;
     wl.notFound = normWord(term);
-    if (!wl.touched) { form.definition.value = ''; setDefSource(''); }
+    if (!manualDefinition()) { form.definition.value = ''; wl.source = ''; setDefSource(''); }
     setDefStatus('Aucune définition trouvée sur le Wiktionnaire.');
+    renderWordSuggest();
     const sug = await wiktSuggest(term).catch(() => null);
     if (run !== wl.run || !sug) return;
     setDefStatus(`Aucune définition trouvée. Vouliez-vous dire <button type="button" class="link-btn" data-suggest="${esc(sug)}">${esc(sug)}</button> ?`);
@@ -1617,10 +1812,8 @@ async function saveWordForm(e) {
   const sameWord = normWord(word.text) === normWord(text);
   const def = form.definition.value.trim();
   if (def) {
-    const fromWikt = wl.found && def === wl.found.text.trim();
-    const unchanged = def === (word.definition || '').trim();
-    word.defSource = fromWikt ? 'wiktionnaire' : (unchanged && word.defSource ? word.defSource : 'perso');
-    if (fromWikt) word.defTitle = wl.found.title;
+    word.defSource = wl.source || 'perso';
+    if (wl.source === 'wiktionnaire' && wl.found) word.defTitle = wl.found.title;
     word.definition = def;
     word.defStatus = 'ok';
   } else if (wl.openedDef.trim()) {
@@ -2605,7 +2798,7 @@ function bindEvents() {
   }));
 
   // Citation rapide
-  $('#fab-quote').addEventListener('click', quickQuote);
+  $('#btn-add-quote-global').addEventListener('click', quickQuote);
   $('#pick-list').addEventListener('click', (e) => {
     const row = e.target.closest('.pick-row');
     if (row) openQuoteForm(null, row.dataset.id);
@@ -2696,13 +2889,70 @@ function bindEvents() {
     updateDupHint();
     renderDicoLinks();
     scheduleWordLookup();
+    scheduleWordSuggest();
   });
   wordForm.definition.addEventListener('input', () => {
-    const v = wordForm.definition.value.trim();
-    wl.touched = Boolean(v) && !(wl.found && v === wl.found.text.trim());
-    setDefSource(v ? (wl.touched ? 'votre définition' : 'Wiktionnaire') : '');
+    // Retoucher la définition du Wiktionnaire en fait « votre définition » ;
+    // une définition collée garde le nom de son dictionnaire.
+    if (!wordForm.definition.value.trim()) wl.source = '';
+    else if (!wl.source || wl.source === 'wiktionnaire') wl.source = 'perso';
+    setDefSource(sourceLabel(wl.source));
   });
-  wordForm.bookId.addEventListener('change', () => syncWordBookUI(true));
+  wordForm.bookId.addEventListener('change', () => {
+    syncWordBookUI(true);
+    if (!$('#qpick').hidden && !qp.quote) showQuoteList();
+  });
+  $('#word-suggest').addEventListener('click', (e) => {
+    const pick = e.target.closest('[data-pick]');
+    if (pick) {
+      wordForm.text.value = pick.dataset.pick;
+      hideWordSuggest();
+      updateDupHint();
+      renderDicoLinks();
+      runWordLookup(pick.dataset.pick);
+      return;
+    }
+    if (e.target.closest('[data-add]')) saveWordForm(new Event('submit'));
+  });
+  // Définition copiée sur le site d'un dictionnaire : un toucher pour la reprendre.
+  $('#def-paste').addEventListener('click', async () => {
+    let text = '';
+    try { text = (await navigator.clipboard.readText()) || ''; } catch { text = ''; }
+    text = text.replace(/\r/g, '').replace(/[ \t]+/g, ' ').replace(/\n{3,}/g, '\n\n').trim();
+    if (!text) {
+      toast('Copiez d’abord la définition sur le site du dictionnaire, puis touchez « Coller ».');
+      return;
+    }
+    wordForm.definition.value = text;
+    wl.source = wl.lastDico || preferredDico();
+    setDefSource(sourceLabel(wl.source));
+    setDefStatus('');
+  });
+  // Dernier dictionnaire ouvert : il devient la source d'une définition collée.
+  document.addEventListener('click', (e) => {
+    const a = e.target.closest('a[data-dico]');
+    if (a) wl.lastDico = a.dataset.dico;
+  });
+  // Mot pris dans une citation
+  $('#word-from-quote').addEventListener('click', () => openQuotePicker());
+  $('#qpick-close').addEventListener('click', closeQuotePicker);
+  $('#qpick-back').addEventListener('click', showQuoteList);
+  $('#qpick-use').addEventListener('click', useQuoteSelection);
+  $('#qpick-list').addEventListener('click', (e) => {
+    const item = e.target.closest('.qpick-item');
+    const quote = item && state.quotes.find((q) => q.id === item.dataset.id);
+    if (quote) showQuoteWords(quote);
+  });
+  $('#qpick-words').addEventListener('click', (e) => {
+    const w = e.target.closest('.qw');
+    if (w) onQuoteWordTap(Number(w.dataset.i));
+  });
+  $('#quote-to-word').addEventListener('click', () => {
+    const f = $('#form-quote');
+    const text = f.text.value.trim();
+    if (!text) { f.text.focus(); return; }
+    openWordFromQuote({ text, bookId: state.editing.quoteBookId, page: f.page.value === '' ? null : parseInt(f.page.value, 10) });
+  });
   $('#def-refresh').addEventListener('click', () => {
     const term = wordForm.text.value.trim();
     if (!term) { wordForm.text.focus(); return; }

@@ -39,9 +39,12 @@
     </section>
 
     <!-- ÉCRAN : Toutes les citations -->
-    <section class="view with-fab" id="view-quotes" aria-label="Citations">
+    <section class="view" id="view-quotes" aria-label="Citations">
       <header class="page-head">
         <h1>Citations</h1>
+        <button class="icon-btn" id="btn-add-quote-global" aria-label="Nouvelle citation">
+          <svg viewBox="0 0 20 20" width="20" height="20" aria-hidden="true"><path d="M10 4v12M4 10h12" stroke="currentColor" stroke-width="2" stroke-linecap="round" fill="none"/></svg>
+        </button>
       </header>
       <div class="search-wrap">
         <svg class="search-ico" viewBox="0 0 20 20" width="16" height="16" aria-hidden="true"><circle cx="8.5" cy="8.5" r="5.5" stroke="currentColor" stroke-width="1.8" fill="none"/><path d="M13 13l4 4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
@@ -103,7 +106,6 @@
         <button class="row-btn" id="btn-import-json">Restaurer une sauvegarde (JSON)</button>
         <button class="row-btn" id="btn-update-app">Rechercher une mise à jour</button>
         <input type="file" id="import-file" accept="application/json,.json" hidden>
-        <p class="hint">Les données restent sur cet appareil. Pensez à exporter une sauvegarde régulièrement : iOS peut effacer le stockage d'une app web inutilisée.</p>
         <p class="hint" id="version-line"></p>
       </div>
     </section>
@@ -142,12 +144,6 @@
         <span>Mot</span>
       </button>
     </div>
-
-    <!-- Capture rapide d'une citation, depuis la bibliothèque et les citations -->
-    <button class="fab" id="fab-quote" aria-label="Nouvelle citation" hidden>
-      <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M9.5 7.5c-2.6.6-4 2.4-4 5v4h5v-5H7.6c.1-1.6 1-2.6 2.4-3l-.5-1Zm9 0c-2.6.6-4 2.4-4 5v4h5v-5h-2.9c.1-1.6 1-2.6 2.4-3l-.5-1Z" fill="currentColor"/></svg>
-      <span>Citation</span>
-    </button>
 
     <!-- Barre d'onglets -->
     <nav class="tabbar" id="tabbar">
@@ -329,6 +325,7 @@
           </label>
         </div>
         <div class="tag-suggest" id="quote-tag-suggest" hidden></div>
+        <button type="button" class="row-btn small quote-to-word" id="quote-to-word" hidden>Noter un mot de cette citation</button>
         <button type="button" class="danger-btn" id="btn-delete-quote" hidden>Supprimer la citation</button>
       </form>
     </div>
@@ -347,11 +344,29 @@
           <span>Mot ou expression *</span>
           <input name="text" type="text" required autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" enterkeyhint="done" placeholder="sibyllin, faire florès…">
         </label>
+        <div class="word-suggest" id="word-suggest" role="listbox" aria-label="Suggestions" hidden></div>
         <p class="word-hint" id="word-dup" hidden></p>
+        <button type="button" class="link-btn from-quote" id="word-from-quote" hidden>
+          <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M9.5 7.5c-2.6.6-4 2.4-4 5v4h5v-5H7.6c.1-1.6 1-2.6 2.4-3l-.5-1Zm9 0c-2.6.6-4 2.4-4 5v4h5v-5h-2.9c.1-1.6 1-2.6 2.4-3l-.5-1Z" fill="currentColor"/></svg>
+          <span>Choisir dans une citation</span>
+        </button>
+        <div class="qpick" id="qpick" hidden>
+          <div class="qpick-head">
+            <span id="qpick-title">Choisissez une citation</span>
+            <button type="button" class="link-btn" id="qpick-close">Fermer</button>
+          </div>
+          <div class="qpick-list" id="qpick-list"></div>
+          <div class="qpick-words" id="qpick-words" hidden></div>
+          <div class="qpick-actions" id="qpick-actions" hidden>
+            <button type="button" class="primary-btn small" id="qpick-use" disabled>Touchez un mot</button>
+            <button type="button" class="link-btn" id="qpick-back">Autre citation</button>
+          </div>
+        </div>
         <div class="def-box">
           <div class="def-head">
             <span>Définition</span>
             <span class="def-source" id="def-source"></span>
+            <button type="button" class="link-btn" id="def-paste">Coller</button>
             <button type="button" class="link-btn" id="def-refresh">Rechercher</button>
           </div>
           <textarea name="definition" rows="4" placeholder="Cherchée automatiquement sur le Wiktionnaire…"></textarea>

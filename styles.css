@@ -73,7 +73,6 @@ input, select, textarea { font: inherit; color: inherit; }
   animation: viewIn .34s var(--ease) both;
 }
 .view.active { display: block; }
-.view.with-fab { padding-bottom: calc(env(safe-area-inset-bottom) + 150px); }
 #view-book { padding-bottom: calc(env(safe-area-inset-bottom) + 104px); }
 
 /* Pas d'animation d'entrée quand l'écran se rafraîchit sur place
@@ -509,6 +508,70 @@ input, select, textarea { font: inherit; color: inherit; }
 }
 .dico-link.preferred { background: var(--accent); color: #fff; }
 .dico-link:active { opacity: .6; }
+.dico-label { font-size: 12.5px; color: var(--muted); align-self: center; margin-right: 2px; }
+
+/* Suggestions pendant la frappe : tout reste visible, « Ajouter » compris */
+.word-suggest {
+  display: flex; flex-wrap: wrap; gap: 6px;
+  margin: -6px 0 12px;
+  padding: 2px 2px 4px;
+}
+.word-suggest .chip { font-size: 14px; padding: 6px 12px; color: var(--ink); }
+.word-suggest .chip.add { color: var(--accent); }
+
+/* Mot choisi dans une citation */
+.from-quote { display: inline-flex; align-items: center; gap: 6px; margin: -4px 2px 12px; font-size: 14.5px; }
+.qpick {
+  background: var(--card);
+  border-radius: 13px;
+  box-shadow: var(--shadow);
+  padding: 10px 12px 12px;
+  margin-bottom: 13px;
+  animation: viewIn .25s var(--ease) both;
+}
+.qpick-head {
+  display: flex; justify-content: space-between; align-items: baseline; gap: 10px;
+  font-size: 13px; font-weight: 600; color: var(--muted);
+  margin-bottom: 8px;
+}
+.qpick-list { max-height: 45vh; overflow-y: auto; display: flex; flex-direction: column; gap: 6px; }
+.qpick-item {
+  text-align: left;
+  padding: 9px 11px;
+  border-radius: 10px;
+  background: var(--bg);
+}
+.qpick-item:active { opacity: .7; }
+.qpick-item .qtext-mini {
+  font-family: var(--font-serif);
+  font-size: 15px;
+  line-height: 1.4;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.qpick-item small { display: block; margin-top: 4px; font-size: 12px; color: var(--muted); }
+.qpick-words {
+  font-family: var(--font-serif);
+  font-size: 18px;
+  line-height: 1.95;
+  max-height: 45vh;
+  overflow-y: auto;
+}
+.qw {
+  font: inherit;
+  color: inherit;
+  padding: 1px 3px;
+  margin: 0 -1px;
+  border-radius: 6px;
+  background: var(--track);
+}
+.qw.on { background: var(--accent); color: #fff; }
+.qpick-actions { display: flex; align-items: center; gap: 14px; margin-top: 12px; }
+.qpick-actions .primary-btn { flex: 1; }
+.qpick-actions .primary-btn:disabled { opacity: .45; }
+.quote-to-word { margin: -2px 0 10px; }
 .note-card p { font-size: 15px; white-space: pre-wrap; }
 .entry-foot {
   display: flex; align-items: center; gap: 10px;
@@ -836,26 +899,6 @@ input[type="date"]::-webkit-date-and-time-value { text-align: left; }
   to   { transform: none; }
 }
 
-.fab {
-  position: fixed;
-  right: max(18px, calc((100vw - 560px) / 2 + 18px));
-  bottom: calc(env(safe-area-inset-bottom) + 78px);
-  display: flex; align-items: center; gap: 7px;
-  padding: 13px 20px 13px 16px;
-  border-radius: 999px;
-  background: var(--accent);
-  color: #fff;
-  font-size: 16px; font-weight: 700;
-  box-shadow: 0 6px 20px rgba(0, 113, 227, .35), 0 2px 6px rgba(0,0,0,.12);
-  z-index: 25;
-  transition: transform .18s var(--ease), opacity .18s;
-  animation: fabIn .35s var(--ease) both;
-}
-.fab:active { transform: scale(.94); }
-@keyframes fabIn {
-  from { opacity: 0; transform: scale(.8) translateY(10px); }
-  to   { opacity: 1; transform: none; }
-}
 
 /* ——— Dictée & scan de texte ——— */
 [hidden] { display: none !important; }
@@ -1089,8 +1132,8 @@ html.secret-open, html.secret-open body { overflow: hidden; }
 .toast {
   position: fixed;
   left: 50%;
-  /* au-dessus du bouton flottant, et du clavier iOS quand il est ouvert */
-  bottom: max(calc(env(safe-area-inset-bottom) + 138px), calc(var(--kb, 0px) + 16px));
+  /* au-dessus des barres du bas, et du clavier iOS quand il est ouvert */
+  bottom: max(calc(env(safe-area-inset-bottom) + 96px), calc(var(--kb, 0px) + 16px));
   transform: translate(-50%, 20px);
   display: flex; align-items: center; gap: 14px;
   background: var(--ink);
