@@ -23,7 +23,7 @@
   <div id="app">
 
     <!-- ÉCRAN : Bibliothèque -->
-    <section class="view with-fab" id="view-library" aria-label="Bibliothèque">
+    <section class="view" id="view-library" aria-label="Bibliothèque">
       <header class="page-head">
         <h1>Bibliothèque</h1>
         <button class="icon-btn" id="btn-add-book" aria-label="Ajouter un livre, un article ou un podcast">
@@ -56,6 +56,39 @@
       <div id="quotes-list"></div>
     </section>
 
+    <!-- ÉCRAN : Mots (vocabulaire) -->
+    <section class="view" id="view-words" aria-label="Mots">
+      <header class="page-head">
+        <h1 id="words-title">Mots</h1>
+        <button class="icon-btn" id="btn-add-word" aria-label="Noter un mot ou une expression">
+          <svg viewBox="0 0 20 20" width="20" height="20" aria-hidden="true"><path d="M10 4v12M4 10h12" stroke="currentColor" stroke-width="2" stroke-linecap="round" fill="none"/></svg>
+        </button>
+      </header>
+      <div class="search-wrap">
+        <svg class="search-ico" viewBox="0 0 20 20" width="16" height="16" aria-hidden="true"><circle cx="8.5" cy="8.5" r="5.5" stroke="currentColor" stroke-width="1.8" fill="none"/><path d="M13 13l4 4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+        <input id="words-search" type="search" placeholder="Un mot, une définition…" autocomplete="off" enterkeyhint="search">
+      </div>
+      <div class="chips" id="words-sort" role="group" aria-label="Trier les mots">
+        <button class="chip active" data-sort="recent">Récents</button>
+        <button class="chip" data-sort="old">Anciens</button>
+        <button class="chip" data-sort="az">A → Z</button>
+        <button class="chip" data-sort="za">Z → A</button>
+        <button class="chip" data-sort="book">Par livre</button>
+      </div>
+      <div class="filters-row two">
+        <select id="words-book-filter" aria-label="Filtrer par livre">
+          <option value="">Tous les livres</option>
+        </select>
+        <select id="dico-select" aria-label="Dictionnaire préféré">
+          <option value="cnrtl">Dico : CNRTL</option>
+          <option value="larousse">Dico : Larousse</option>
+          <option value="robert">Dico : Le Robert</option>
+          <option value="wiktionnaire">Dico : Wiktionnaire</option>
+        </select>
+      </div>
+      <div id="words-list"></div>
+    </section>
+
     <!-- ÉCRAN : Statistiques + données -->
     <section class="view" id="view-stats" aria-label="Statistiques">
       <header class="page-head">
@@ -64,7 +97,8 @@
       <div id="stats-content"></div>
       <div class="data-section">
         <h2 class="section-title">Données</h2>
-        <button class="row-btn" id="btn-export-md">Exporter notes &amp; citations (Markdown)</button>
+        <button class="row-btn" id="btn-export-md">Exporter notes, citations &amp; mots (Markdown)</button>
+        <button class="row-btn" id="btn-export-words">Exporter mes mots (Markdown)</button>
         <button class="row-btn" id="btn-export-json">Sauvegarder tout (JSON)</button>
         <button class="row-btn" id="btn-import-json">Restaurer une sauvegarde (JSON)</button>
         <button class="row-btn" id="btn-update-app">Rechercher une mise à jour</button>
@@ -87,6 +121,7 @@
       <div class="segmented" id="book-tabs" role="tablist">
         <button class="seg-btn active" data-tab="quotes" role="tab" aria-selected="true">Citations <span class="seg-count" id="count-quotes"></span></button>
         <button class="seg-btn" data-tab="notes" role="tab" aria-selected="false">Notes <span class="seg-count" id="count-notes"></span></button>
+        <button class="seg-btn" data-tab="words" role="tab" aria-selected="false">Mots <span class="seg-count" id="count-words"></span></button>
       </div>
       <div id="book-tab-content"></div>
       <button class="row-btn small export-btn" id="btn-export-book">Exporter cette fiche (.md)</button>
@@ -101,6 +136,10 @@
       <button class="secondary-btn" id="btn-add-note">
         <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M4.5 19.5h4l10.2-10.2a2 2 0 0 0 0-2.8l-1.2-1.2a2 2 0 0 0-2.8 0L4.5 15.5v4Z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" fill="none"/><path d="M13.5 6.5l4 4" stroke="currentColor" stroke-width="1.8"/></svg>
         <span>Note</span>
+      </button>
+      <button class="secondary-btn" id="btn-add-word-book">
+        <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><text x="12" y="17.5" text-anchor="middle" font-size="13" font-weight="700" font-family="Georgia, 'Times New Roman', serif" fill="currentColor">Aa</text></svg>
+        <span>Mot</span>
       </button>
     </div>
 
@@ -119,6 +158,10 @@
       <a href="#/quotes" class="tab" data-route="quotes">
         <svg viewBox="0 0 24 24" width="24" height="24" aria-hidden="true"><path d="M9.5 7.5c-2.6.6-4 2.4-4 5v4h5v-5H7.6c.1-1.6 1-2.6 2.4-3l-.5-1Zm9 0c-2.6.6-4 2.4-4 5v4h5v-5h-2.9c.1-1.6 1-2.6 2.4-3l-.5-1Z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" fill="none"/></svg>
         <span>Citations</span>
+      </a>
+      <a href="#/words" class="tab" data-route="words">
+        <svg viewBox="0 0 24 24" width="24" height="24" aria-hidden="true"><text x="12" y="17.5" text-anchor="middle" font-size="14" font-weight="700" font-family="Georgia, 'Times New Roman', serif" fill="currentColor">Aa</text></svg>
+        <span>Mots</span>
       </a>
       <a href="#/stats" class="tab" data-route="stats">
         <svg viewBox="0 0 24 24" width="24" height="24" aria-hidden="true"><path d="M5 19V12M12 19V5m7 14v-9" stroke="currentColor" stroke-width="2" stroke-linecap="round" fill="none"/></svg>
@@ -290,6 +333,49 @@
       </form>
     </div>
 
+    <div class="sheet" id="sheet-word" role="dialog" aria-modal="true" aria-labelledby="sheet-word-title" hidden>
+      <div class="sheet-head">
+        <div class="sheet-handle"></div>
+        <div class="sheet-bar">
+          <button type="button" class="bar-btn" data-cancel>Annuler</button>
+          <h2 id="sheet-word-title">Nouveau mot</h2>
+          <button type="submit" form="form-word" class="bar-btn strong">Enregistrer</button>
+        </div>
+      </div>
+      <form id="form-word" class="sheet-body" novalidate>
+        <label class="field">
+          <span>Mot ou expression *</span>
+          <input name="text" type="text" required autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" enterkeyhint="done" placeholder="sibyllin, faire florès…">
+        </label>
+        <p class="word-hint" id="word-dup" hidden></p>
+        <div class="def-box">
+          <div class="def-head">
+            <span>Définition</span>
+            <span class="def-source" id="def-source"></span>
+            <button type="button" class="link-btn" id="def-refresh">Rechercher</button>
+          </div>
+          <textarea name="definition" rows="4" placeholder="Cherchée automatiquement sur le Wiktionnaire…"></textarea>
+          <p class="def-status" id="def-status"></p>
+          <div class="dico-links" id="dico-links"></div>
+        </div>
+        <label class="field">
+          <span>Contexte <small>(la phrase où vous l’avez rencontré)</small></span>
+          <textarea name="context" rows="2" placeholder="« … »"></textarea>
+        </label>
+        <div class="field-row">
+          <label class="field">
+            <span>Livre</span>
+            <select name="bookId"><option value="">Aucun livre</option></select>
+          </label>
+          <label class="field field-page">
+            <span id="word-page-label">Page</span>
+            <input name="page" type="number" min="0" inputmode="numeric">
+          </label>
+        </div>
+        <button type="button" class="danger-btn" id="btn-delete-word" hidden>Supprimer le mot</button>
+      </form>
+    </div>
+
     <div class="sheet" id="sheet-pick" role="dialog" aria-modal="true" aria-labelledby="sheet-pick-title" hidden>
       <div class="sheet-head">
         <div class="sheet-handle"></div>
@@ -317,6 +403,22 @@
         <button type="button" class="crop-btn" id="crop-cancel">Annuler</button>
         <button type="button" class="crop-btn" id="crop-all">Tout</button>
         <button type="button" class="crop-btn primary" id="crop-ok">Lire le texte</button>
+      </div>
+    </div>
+
+    <!-- Monde caché : 5 touchers sur le titre « Mots » -->
+    <div class="secret" id="secret" role="dialog" aria-modal="true" aria-labelledby="secret-title" hidden>
+      <div class="secret-stars" aria-hidden="true"></div>
+      <div class="secret-inner">
+        <p class="secret-kicker">✦ ✦ ✦</p>
+        <h2 id="secret-title">Vous êtes dans un monde caché de la langue française</h2>
+        <p class="secret-sub">Ici, on ne parle qu’avec vos mots. Touchez-en un pour vous souvenir de son sens.</p>
+        <div class="secret-text" id="secret-text"></div>
+        <div class="secret-actions">
+          <button type="button" class="secret-btn primary" id="secret-again">Encore</button>
+          <button type="button" class="secret-btn" id="secret-copy">Copier</button>
+        </div>
+        <button type="button" class="secret-exit" id="secret-exit">Revenir au monde réel</button>
       </div>
     </div>
 

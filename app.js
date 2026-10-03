@@ -1,13 +1,14 @@
 import * as db from './db.js';
 
 /* Synchroniser avec VERSION dans sw.js à chaque mise à jour. */
-const APP_VERSION = '10';
+const APP_VERSION = '11';
 
 /* ——— État en mémoire (rechargé depuis IndexedDB au démarrage) ——— */
 const state = {
   books: [],
   notes: [],
   quotes: [],
+  words: [],
   route: 'library',
   currentBookId: null,
   bookTab: 'quotes',
@@ -16,7 +17,10 @@ const state = {
   quotesBook: '',
   quotesTag: null,
   quotesQuery: '',
-  editing: { bookId: null, noteId: null, noteBookId: null, quoteId: null, quoteBookId: null },
+  wordsQuery: '',
+  wordsBook: '',
+  wordsSort: 'recent',
+  editing: { bookId: null, noteId: null, noteBookId: null, quoteId: null, quoteBookId: null, wordId: null },
   form: { type: 'book', status: 'toread', rating: 0 }
 };
 
@@ -91,6 +95,19 @@ const byRecent = (a, b) => (b.updatedAt || '').localeCompare(a.updatedAt || '');
 function bookById(id) { return state.books.find((b) => b.id === id); }
 function notesOf(id) { return state.notes.filter((n) => n.bookId === id).sort((a, b) => b.createdAt.localeCompare(a.createdAt)); }
 function quotesOf(id) { return state.quotes.filter((q) => q.bookId === id).sort((a, b) => (a.page ?? 1e9) - (b.page ?? 1e9)); }
+function wordsOf(id) {
+  return state.words.filter((w) => w.bookId === id)
+    .sort((a, b) => (a.page ?? 1e9) - (b.page ?? 1e9) || a.createdAt.localeCompare(b.createdAt));
+}
+
+/* Forme comparable d'un mot : minuscules, sans accents ni apostrophe typographique. */
+const normWord = (s) => String(s || '').trim().toLowerCase()
+  .normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[’']/g, "'").replace(/\s+/g, ' ');
+
+function fmtShortDate(iso) {
+  const d = new Date(iso);
+  return isNaN(d) ? '' : d.toLocaleDateString('fr-FR', { day: 'numeric', month: 'short', year: 'numeric' });
+}
 
 /* ——— Toast, avec bouton d'action facultatif (« Annuler ») ——— */
 let toastTimer = null;
@@ -130,6 +147,8 @@ function router() {
     state.currentBookId = m[1];
   } else if (hash === '#/quotes') {
     state.route = 'quotes';
+  } else if (hash === '#/words') {
+    state.route = 'words';
   } else if (hash === '#/stats') {
     state.route = 'stats';
   } else {
@@ -150,10 +169,11 @@ function render() {
   $('#tabbar').classList.toggle('hidden', r === 'book');
   $$('.tab').forEach((t) => t.classList.toggle('active', t.dataset.route === r));
   $('#book-actions').hidden = r !== 'book';
-  $('#fab-quote').hidden = !((r === 'library' || r === 'quotes') && state.books.length > 0);
+  $('#fab-quote').hidden = !(r === 'quotes' && state.books.length > 0);
 
   if (r === 'library') { $('#view-library').classList.add('active'); renderLibrary(); }
   if (r === 'quotes') { $('#view-quotes').classList.add('active'); renderQuotesView(); }
+  if (r === 'words') { $('#view-words').classList.add('active'); renderWordsView(); }
   if (r === 'stats') { $('#view-stats').classList.add('active'); renderStats(); }
   if (r === 'book') { $('#view-book').classList.add('active'); renderBook(); }
 
@@ -229,8 +249,9 @@ function renderLibrary() {
       const inBook = (b.title + ' ' + (b.author || '') + ' ' + (b.show || '') + ' ' + (b.tags || []).join(' ')).toLowerCase().includes(q);
       const inNote = notesOf(b.id).some((n) => n.text.toLowerCase().includes(q));
       const inQuote = quotesOf(b.id).some((qt) => qt.text.toLowerCase().includes(q));
-      if (inBook || inNote || inQuote) {
-        results.push({ book: b, badge: inBook ? null : (inNote ? 'trouvé dans les notes' : 'trouvé dans les citations') });
+      const inWord = wordsOf(b.id).some((w) => (w.text + ' ' + (w.definition || '')).toLowerCase().includes(q));
+      if (inBook || inNote || inQuote || inWord) {
+        results.push({ book: b, badge: inBook ? null : (inNote ? 'trouvé dans les notes' : (inQuote ? 'trouvé dans les citations' : 'trouvé dans les mots')) });
       }
     }
     listEl.innerHTML = results.length
@@ -387,8 +408,10 @@ function renderBook() {
   // Onglets (avec compteurs)
   const notes = notesOf(book.id);
   const quotes = quotesOf(book.id);
+  const words = wordsOf(book.id);
   $('#count-quotes').textContent = quotes.length || '';
   $('#count-notes').textContent = notes.length || '';
+  $('#count-words').textContent = words.length || '';
   $$('#book-tabs .seg-btn').forEach((b) => {
     const on = b.dataset.tab === state.bookTab;
     b.classList.toggle('active', on);
@@ -400,6 +423,10 @@ function renderBook() {
     contentEl.innerHTML = notes.length
       ? notes.map(noteCard).join('') + LIST_HINT
       : `<div class="empty"><h3>Aucune note</h3><p>Touchez « Note » en bas pour noter vos réflexions au fil de la lecture.</p></div>`;
+  } else if (state.bookTab === 'words') {
+    contentEl.innerHTML = words.length
+      ? words.map((w, i) => wordCard(w, i, false)).join('') + LIST_HINT
+      : `<div class="empty"><h3>Aucun mot</h3><p>Touchez « Mot » en bas pour noter un mot ou une expression inconnus : la définition s’affiche toute seule.</p></div>`;
   } else {
     contentEl.innerHTML = quotes.length
       ? quotes.map((q, i) => quoteCard(q, i, false)).join('') + LIST_HINT
@@ -499,6 +526,7 @@ function renderStats() {
         ${minutesHeard ? `<div><b>${minutesHeard.toLocaleString('fr-FR')}</b><span>min écoutées</span></div>` : ''}
         <div><b>${state.quotes.length}</b><span>citations</span></div>
         <div><b>${state.notes.length}</b><span>notes</span></div>
+        <div><b>${state.words.length}</b><span>mots</span></div>
         <div><b>${avg ? avg + ' ★' : '—'}</b><span>note moyenne</span></div>
       </div>
     </div>
@@ -552,6 +580,7 @@ function closeSheet({ discard = false, keepBackdrop = false } = {}) {
     else { saveDraft(kind); draftBase[kind] = null; }
   }
   if (sheet.id === 'sheet-quote') closeOcrPanel();
+  if (sheet.id === 'sheet-word') { clearTimeout(wl.timer); wl.run++; }
   if (sheet.contains(document.activeElement)) document.activeElement.blur();
 
   sheet.classList.remove('open', 'dragging');
@@ -767,6 +796,10 @@ async function deleteCurrentBook() {
   if (!book) return;
   const notes = notesOf(book.id);
   const quotes = quotesOf(book.id);
+  // Le vocabulaire survit au livre : ses mots passent « sans livre ».
+  const words = wordsOf(book.id);
+  for (const w of words) w.bookId = null;
+  if (words.length) await db.putMany({ words });
   await db.removeBookCascade(book.id);
   state.books = state.books.filter((b) => b.id !== book.id);
   state.notes = state.notes.filter((n) => n.bookId !== book.id);
@@ -774,10 +807,11 @@ async function deleteCurrentBook() {
   closeSheet();
   if (state.route === 'book') navigate('#/library');
   render();
-  toast(`${TYPE_LABELS[book.type] || 'Livre'} supprimé`, {
+  toast(`${TYPE_LABELS[book.type] || 'Livre'} supprimé${words.length ? ' · mots conservés' : ''}`, {
     label: 'Annuler',
     run: async () => {
-      await db.putMany({ books: [book], notes, quotes });
+      for (const w of words) w.bookId = book.id;
+      await db.putMany({ books: [book], notes, quotes, words });
       if (!bookById(book.id)) state.books.push(book);
       state.notes.push(...notes.filter((n) => !state.notes.some((x) => x.id === n.id)));
       state.quotes.push(...quotes.filter((q) => !state.quotes.some((x) => x.id === q.id)));
@@ -959,28 +993,12 @@ async function saveQuoteForm(e) {
   quote.tags = parseTags(form.tags.value);
   await db.put('quotes', quote);
 
-  // Une citation plus loin que la page notée fait avancer la progression.
-  let progressed = null;
-  if (quote.page != null && book.status !== 'done') {
-    const target = book.totalPages ? Math.min(quote.page, book.totalPages) : quote.page;
-    if (target > (book.currentPage || 0)) {
-      book.currentPage = target;
-      if (book.status === 'toread') {
-        book.status = 'reading';
-        if (!book.startDate) book.startDate = todayISO();
-      }
-      book.updatedAt = now;
-      await db.put('books', book);
-      progressed = target;
-    }
-  }
+  const progressed = await advanceProgress(book, quote.page, now);
 
   dropDraft('quote');
   closeSheet();
   if (state.route === 'book' && state.currentBookId === book.id) state.bookTab = 'quotes';
-  toast(progressed == null
-    ? 'Citation enregistrée'
-    : `Citation enregistrée · progression : ${book.type === 'podcast' ? progressed + ' min' : 'p. ' + progressed}`);
+  toast('Citation enregistrée' + progressNote(book, progressed));
   render();
 }
 
@@ -1002,10 +1020,16 @@ async function deleteQuote(id) {
 }
 
 function deleteEntry(kind, id) {
+  if (kind === 'word') return deleteWord(id);
   return kind === 'note' ? deleteNote(id) : deleteQuote(id);
 }
 
 function openEntry(kind, id) {
+  if (kind === 'word') {
+    const word = state.words.find((w) => w.id === id);
+    if (word) openWordForm(word);
+    return;
+  }
   if (kind === 'note') {
     const note = state.notes.find((n) => n.id === id);
     if (note) openNoteForm(note);
@@ -1058,7 +1082,7 @@ function bindSwipeToDelete(container) {
   container.addEventListener('pointerdown', (e) => {
     if (e.pointerType === 'mouse' || !e.isPrimary) return;
     const card = e.target.closest('.swipeable');
-    if (!card || e.target.closest('button')) return;
+    if (!card || e.target.closest('button, a')) return;
     s = { card, id: e.pointerId, x0: e.clientX, y0: e.clientY, dx: 0, swiping: false };
   });
   container.addEventListener('pointermove', (e) => {
@@ -1096,6 +1120,658 @@ function bindSwipeToDelete(container) {
   container.addEventListener('pointercancel', (e) => finish(e, true));
 }
 
+/* ═══════════ MOTS (vocabulaire) ═══════════
+   Mots et expressions inconnus, notés comme des citations. La définition
+   vient du Wiktionnaire, le seul grand dictionnaire français qu'une app a
+   le droit d'interroger (CNRTL, Larousse et Le Robert le bloquent) ; elle
+   est enregistrée avec le mot, donc lisible hors ligne. Un bouton ouvre le
+   mot dans le dictionnaire préféré. */
+
+const DICTIONARIES = {
+  cnrtl: { label: 'CNRTL', url: (w) => 'https://www.cnrtl.fr/definition/' + encodeURIComponent(w) },
+  larousse: { label: 'Larousse', url: (w) => 'https://www.larousse.fr/dictionnaires/francais/' + encodeURIComponent(w) },
+  robert: { label: 'Le Robert', url: (w) => 'https://dictionnaire.lerobert.com/definition/' + robertSlug(w) },
+  wiktionnaire: { label: 'Wiktionnaire', url: (w) => 'https://fr.wiktionary.org/wiki/' + encodeURIComponent(w.replace(/ /g, '_')) }
+};
+const DICO_KEY = 'lecture-dico';
+const WORDS_SORT_KEY = 'lecture-tri-mots';
+
+/* Le Robert range ses pages sous un identifiant sans accents. */
+function robertSlug(w) {
+  return normWord(w).replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+}
+
+function preferredDico() {
+  let k = null;
+  try { k = localStorage.getItem(DICO_KEY); } catch { /* stockage bloqué */ }
+  return DICTIONARIES[k] ? k : 'cnrtl';
+}
+
+function setPreferredDico(k) {
+  try { localStorage.setItem(DICO_KEY, k); } catch { /* sans importance */ }
+}
+
+const dicoURL = (word, key = preferredDico()) => DICTIONARIES[key].url(word.trim());
+
+/* ——— Définitions du Wiktionnaire ——— */
+const WIKT_API = 'https://fr.wiktionary.org/w/api.php';
+const POS_LABELS = {
+  nom: 'nom commun', adj: 'adjectif', adv: 'adverbe', verb: 'verbe', 'nom-pr': 'nom propre',
+  'loc-phr': 'locution-phrase', prép: 'préposition', conj: 'conjonction', interj: 'interjection'
+};
+// Modèles sans contenu utile dans une définition (renvois, marques d'ébauche…)
+const WIKT_DROP = new Set(['ébauche-déf', 'ébauche', 'réf', 'réf ?', 'ref', 'référence nécessaire', 'source',
+  'm', 'f', 'mf', 'n', 'pron', 'phon', 'conj', 'invar', 'sp', 'p', 's', 'i', 't', 'prnl', 'réfl', 'note']);
+const WIKT_SUP = { e: 'ᵉ', er: 'ᵉʳ', re: 'ʳᵉ', ère: 'ʳᵉ', ème: 'ᵉ' };
+
+const capFirst = (s) => (s ? s.charAt(0).toLocaleUpperCase('fr') + s.slice(1) : s);
+
+function decodeEntities(s) {
+  return s.replace(/&nbsp;|&#160;/g, ' ').replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"').replace(/&#39;|&apos;/g, "'")
+    .replace(/&#x([0-9a-f]+);/gi, (_, h) => String.fromCodePoint(parseInt(h, 16)))
+    .replace(/&#(\d+);/g, (_, d) => String.fromCodePoint(Number(d)))
+    .replace(/&amp;/g, '&');
+}
+
+/* Rend un modèle {{…}} en texte : marques d'usage entre parenthèses
+   (« (Figuré) », « (Médecine) »), liens, variantes ; le reste est ignoré. */
+function renderWiktTemplate(inner) {
+  const parts = inner.split('|').map((p) => p.trim());
+  const name = parts[0].toLowerCase().replace(/_/g, ' ');
+  const named = {};
+  const args = [];
+  for (const p of parts.slice(1)) {
+    const m = p.match(/^([\w-]+)\s*=\s*([\s\S]*)$/);
+    if (m) named[m[1]] = m[2]; else args.push(p);
+  }
+  const isLang = (a) => /^[a-z]{2,3}(-[a-z]+)?$/.test(a);
+  if (WIKT_DROP.has(name)) return '';
+  if (WIKT_SUP[name]) return WIKT_SUP[name];
+  switch (name) {
+    case 'term': case 'term lien':
+      return args[0] ? `(${capFirst(args[0])})` : '';
+    case 'lexique': case 'info lex': case 'domaine':
+      return `(${args.filter((a) => !isLang(a)).map(capFirst).join(', ')})`;
+    case 'w': case 'wp':
+      return args[1] || args[0] || '';
+    case 'lien': case 'l':
+      return named.dif || args[0] || '';
+    case 'nom w pc':
+      return args.join(' ');
+    case 'siècle':
+      return args[0] ? `${args[0]}ᵉ siècle` : '';
+    case 'variante de': case 'variante ortho de': case 'variante orthographique de':
+      return `Variante${name.includes('ortho') ? ' orthographique' : ''} de ${args[0] || ''}`;
+    case 'cf': case 'voir':
+      return args.length ? '→ voir ' + args.filter((a) => !isLang(a)).join(', ') : '';
+    default:
+      // Marque d'usage : {{figuré|fr}}, {{familier|fr}}, {{médecine|fr}}…
+      if (!args.length || args.every(isLang)) return `(${capFirst(name)})`;
+      return args[0];
+  }
+}
+
+function wikiToText(s) {
+  const special = (target) => /^(catégorie|category|fichier|file|image|annexe):/i.test(target);
+  let t = s.replace(/<ref[^>]*\/>/gi, '').replace(/<ref[^>]*>[\s\S]*?<\/ref>/gi, '').replace(/<!--[\s\S]*?-->/g, '');
+  for (let i = 0; i < 12 && t.includes('{{'); i++) {
+    const next = t.replace(/\{\{([^{}]*)\}\}/g, (_, inner) => renderWiktTemplate(inner));
+    if (next === t) break;
+    t = next;
+  }
+  t = t.replace(/\[\[([^\]|]*)\|([^\]]*)\]\]/g, (_, target, label) => (special(target) ? '' : label))
+    .replace(/\[\[([^\]]*)\]\]/g, (_, target) => (special(target) ? '' : target.replace(/^[a-z]{1,3}:/i, '').replace(/#.*$/, '')))
+    .replace(/\[(?:https?:)?\/\/\S+\s+([^\]]+)\]/g, '$1')
+    .replace(/'{2,}/g, '')
+    .replace(/<[^>]+>/g, '');
+  return decodeEntities(t).replace(/\(\s*\)/g, '').replace(/\s+/g, ' ')
+    .replace(/\s+([.,)])/g, '$1').replace(/\(\s+/g, '(').trim();
+}
+
+/* Extrait la section française d'une page : nature (nom, verbe…) et
+   définitions. Les formes fléchies indiquent leur lemme (« sibyllin »). */
+function parseWiktionary(wikitext) {
+  const blocks = [];
+  let inFr = false;
+  let cur = null;
+  for (const raw of String(wikitext || '').split('\n')) {
+    const line = raw.trim();
+    const lang = line.match(/^==\s*\{\{langue\|([^}|]+)/);
+    if (lang) { inFr = lang[1].trim() === 'fr'; cur = null; continue; }
+    if (!inFr) continue;
+    const head = line.match(/^(={3,})\s*\{\{S\|([^|}]+)((?:\|[^}]*)?)\}\}/);
+    if (head) {
+      cur = null;
+      if (head[1].length === 3 && /\|\s*fr\s*(\||$)/.test(head[3] || '')) {
+        const key = head[2].trim().toLowerCase();
+        cur = { pos: POS_LABELS[key] || key, flexion: /flexion/.test(head[3]), items: [], lemma: null };
+        blocks.push(cur);
+      }
+      continue;
+    }
+    if (/^==/.test(line)) { cur = null; continue; }
+    if (!cur) continue;
+    const def = line.match(/^#(?![#*:])\s*(.*)$/);
+    if (!def) continue;
+    if (cur.flexion && !cur.lemma) {
+      const links = [...def[1].matchAll(/\[\[([^\]|#]+)[^\]]*\]\]/g)];
+      const tpl = def[1].match(/\{\{lien\|([^|}]+)/);
+      cur.lemma = links.length ? links[links.length - 1][1].trim() : (tpl ? tpl[1].trim() : null);
+    }
+    const text = wikiToText(def[1]);
+    if (text && cur.items.length < 6) cur.items.push(text);
+  }
+  return blocks.filter((b) => b.items.length);
+}
+
+function formatDefinition(blocks, title = '') {
+  return blocks.slice(0, 3).map((b) => [
+    title ? `${title} (${b.pos})` : b.pos,
+    ...b.items.slice(0, 4).map((t, i) => `${i + 1}. ${t}`)
+  ].join('\n')).join('\n\n');
+}
+
+async function wiktPage(title) {
+  const url = `${WIKT_API}?action=parse&format=json&formatversion=2&origin=*&redirects=1&prop=wikitext&page=${encodeURIComponent(title)}`;
+  const res = await fetch(url);
+  if (!res.ok) throw new Error('HTTP ' + res.status);
+  const data = await res.json();
+  if (data.error || !data.parse) return null; // page absente
+  return { title: data.parse.title, blocks: parseWiktionary(data.parse.wikitext) };
+}
+
+/* Variantes essayées : telle quelle, sans majuscule initiale, apostrophe
+   typographique (titres du Wiktionnaire), sans « se » pour un verbe. */
+function lookupCandidates(term) {
+  const t = term.trim().replace(/\s+/g, ' ');
+  const low = t.charAt(0).toLowerCase() + t.slice(1);
+  const out = [t, low, t.replace(/'/g, '’'), low.replace(/'/g, '’')];
+  const bare = low.replace(/^(se |s[’'])/i, '');
+  if (bare !== low && bare) out.push(bare);
+  return [...new Set(out)];
+}
+
+async function lookupDefinition(term) {
+  for (const cand of lookupCandidates(term)) {
+    const page = await wiktPage(cand);
+    if (!page || !page.blocks.length) continue;
+    const own = page.blocks.filter((b) => !b.flexion);
+    const flex = page.blocks.find((b) => b.flexion && b.lemma);
+    if (!own.length && flex) {
+      // Forme fléchie (pluriel, féminin, verbe conjugué) : on va chercher le lemme.
+      const lemma = await wiktPage(flex.lemma).catch(() => null);
+      const lemmaBlocks = lemma ? lemma.blocks.filter((b) => !b.flexion) : [];
+      return {
+        title: page.title,
+        text: flex.items[0] + (lemmaBlocks.length ? '\n\n' + formatDefinition(lemmaBlocks, lemma.title) : '')
+      };
+    }
+    return { title: page.title, text: formatDefinition(own.length ? own : page.blocks) };
+  }
+  return null;
+}
+
+function levenshtein(a, b) {
+  let prev = Array.from({ length: b.length + 1 }, (_, j) => j);
+  for (let i = 1; i <= a.length; i++) {
+    const cur = [i];
+    for (let j = 1; j <= b.length; j++) {
+      cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+    }
+    prev = cur;
+  }
+  return prev[b.length];
+}
+
+/* Orthographe incertaine : « Vouliez-vous dire… ? » */
+async function wiktSuggest(term) {
+  const url = `${WIKT_API}?action=query&format=json&formatversion=2&origin=*&list=search&srnamespace=0&srlimit=5&srinfo=suggestion&srsearch=${encodeURIComponent(term)}`;
+  const res = await fetch(url);
+  if (!res.ok) return null;
+  const q = (await res.json()).query || {};
+  const differs = (t) => t && t.toLowerCase() !== term.trim().toLowerCase();
+  const sug = q.searchinfo && q.searchinfo.suggestion;
+  if (differs(sug)) return sug;
+  const close = (q.search || []).map((r) => r.title)
+    .find((t) => differs(t) && levenshtein(normWord(t), normWord(term)) <= 2);
+  return close || null;
+}
+
+/* ——— Aperçus ——— */
+function defPreview(w) {
+  if (!w.definition) {
+    return { muted: true, html: w.defStatus === 'none' ? 'Sans définition — touchez le dictionnaire' : 'Définition en attente…' };
+  }
+  const lines = w.definition.split('\n').map((l) => l.trim()).filter(Boolean);
+  const k = lines.findIndex((l) => /^\d+\.\s/.test(l));
+  if (k < 0) return { html: esc(lines.join(' ')) };
+  const pos = k > 0 && !/^\d+\./.test(lines[k - 1]) ? lines[k - 1] : '';
+  return { html: (pos ? `<span class="pos">${esc(pos)}</span> · ` : '') + esc(lines[k].replace(/^\d+\.\s*/, '')) };
+}
+
+function defOneLine(w) {
+  if (!w.definition) return '';
+  const lines = w.definition.split('\n').map((l) => l.trim()).filter(Boolean);
+  const senses = lines.filter((l) => /^\d+\.\s/.test(l)).slice(0, 3).map((l) => l.replace(/^\d+\.\s*/, ''));
+  if (!senses.length) return lines.join(' ');
+  // Forme fléchie : « Féminin singulier de sibyllin : Qui appartient… »
+  const lead = !/^\d+\./.test(lines[0]) && /[.!?…]$/.test(lines[0]) ? lines[0].replace(/\.$/, '') + ' : ' : '';
+  return lead + senses.join(' ; ');
+}
+
+const cleanContext = (s) => String(s || '').replace(/^[«"“\s]+|[»"”\s]+$/g, '');
+
+function wordCard(w, i, showBook = true) {
+  const book = w.bookId ? bookById(w.bookId) : null;
+  const meta = [];
+  if (showBook && book) meta.push(esc(book.title));
+  if (w.page != null) meta.push(book && book.type === 'podcast' ? `à ${w.page} min` : `p. ${w.page}`);
+  meta.push(esc(fmtShortDate(w.createdAt)));
+  const prev = defPreview(w);
+  return `
+  <div class="swipe-wrap" style="animation-delay:${Math.min(i * 35, 350)}ms">
+    <div class="swipe-bg" aria-hidden="true">Supprimer</div>
+    <article class="card word-card swipeable" data-kind="word" data-id="${w.id}" tabindex="0" aria-label="${esc(w.text)} — toucher pour ouvrir">
+      <div class="word-top">
+        <h3 class="word-text">${esc(w.text)}</h3>
+        <a class="dico-quick" href="${esc(dicoURL(w.text))}" target="_blank" rel="noopener">${esc(DICTIONARIES[preferredDico()].label)} ↗</a>
+      </div>
+      <p class="word-def${prev.muted ? ' muted' : ''}">${prev.html}</p>
+      ${w.context ? `<p class="word-ctx">« ${esc(cleanContext(w.context))} »</p>` : ''}
+      <p class="word-meta">${meta.join(' · ')}</p>
+    </article>
+  </div>`;
+}
+
+/* ——— Écran Mots ——— */
+const wordLetter = (w) => (normWord(w.text).replace(/^[^a-z0-9]+/, '').charAt(0) || '#').toUpperCase();
+const byAlpha = (a, b) => a.text.localeCompare(b.text, 'fr', { sensitivity: 'base', ignorePunctuation: true });
+const byPage = (a, b) => (a.page ?? 1e9) - (b.page ?? 1e9) || a.createdAt.localeCompare(b.createdAt);
+
+function renderWordsView() {
+  // Filtre par livre : seulement les livres qui ont des mots, et « Sans livre ».
+  const loose = (w) => !w.bookId || !bookById(w.bookId);
+  const ids = [...new Set(state.words.map((w) => w.bookId).filter((id) => id && bookById(id)))];
+  const hasLoose = state.words.some(loose);
+  if ((state.wordsBook && state.wordsBook !== 'none' && !ids.includes(state.wordsBook))
+      || (state.wordsBook === 'none' && !hasLoose)) state.wordsBook = '';
+  $('#words-book-filter').innerHTML = `<option value="">Tous les livres</option>`
+    + ids.map(bookById).sort((a, b) => a.title.localeCompare(b.title, 'fr'))
+      .map((b) => `<option value="${b.id}" ${state.wordsBook === b.id ? 'selected' : ''}>${esc(b.title)}</option>`).join('')
+    + (hasLoose ? `<option value="none" ${state.wordsBook === 'none' ? 'selected' : ''}>Sans livre</option>` : '');
+  $('#dico-select').value = preferredDico();
+  $$('#words-sort .chip').forEach((c) => c.classList.toggle('active', c.dataset.sort === state.wordsSort));
+
+  const listEl = $('#words-list');
+  if (!state.words.length) {
+    listEl.innerHTML = `<div class="empty">
+      <span class="glyph">Aa</span>
+      <h3>Aucun mot pour l’instant</h3>
+      <p>Touchez + pour noter un mot ou une expression que vous ne connaissez pas : sa définition s’affiche toute seule.</p>
+    </div>`;
+    return;
+  }
+
+  let words = state.words.slice();
+  if (state.wordsBook === 'none') words = words.filter(loose);
+  else if (state.wordsBook) words = words.filter((w) => w.bookId === state.wordsBook);
+  const q = normWord(state.wordsQuery);
+  if (q) {
+    words = words.filter((w) => {
+      const book = w.bookId ? bookById(w.bookId) : null;
+      return normWord([w.text, w.definition, w.context, book && book.title].filter(Boolean).join(' ')).includes(q);
+    });
+  }
+  if (!words.length) {
+    listEl.innerHTML = `<div class="empty"><h3>Aucun résultat</h3><p>${q ? `Rien ne correspond à « ${esc(state.wordsQuery)} ».` : 'Aucun mot pour ce livre.'}</p></div>`;
+    return;
+  }
+
+  const sort = state.wordsSort;
+  let html = '';
+  let i = 0;
+  if (sort === 'az' || sort === 'za') {
+    words.sort(sort === 'az' ? byAlpha : (a, b) => byAlpha(b, a));
+    let letter = null;
+    for (const w of words) {
+      const L = wordLetter(w);
+      if (L !== letter) { html += `<h2 class="section-title letter">${esc(L)}</h2>`; letter = L; }
+      html += wordCard(w, i++);
+    }
+  } else if (sort === 'book') {
+    const groups = new Map();
+    for (const w of words) {
+      const key = loose(w) ? '' : w.bookId;
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(w);
+    }
+    const keys = [...groups.keys()].sort((a, b) => (!a) - (!b)
+      || (a && b ? bookById(a).title.localeCompare(bookById(b).title, 'fr') : 0));
+    for (const key of keys) {
+      const list = groups.get(key).sort(byPage);
+      html += `<h2 class="section-title">${esc(key ? bookById(key).title : 'Sans livre')} <span class="count">· ${list.length}</span></h2>`;
+      html += list.map((w) => wordCard(w, i++, false)).join('');
+    }
+  } else {
+    words.sort(sort === 'old'
+      ? (a, b) => a.createdAt.localeCompare(b.createdAt)
+      : (a, b) => b.createdAt.localeCompare(a.createdAt));
+    html = `<p class="words-count">${words.length} mot${words.length > 1 ? 's' : ''}</p>`
+      + words.map((w) => wordCard(w, i++)).join('');
+  }
+  listEl.innerHTML = html + LIST_HINT;
+}
+
+/* ——— Fiche d'un mot ——— */
+const wl = { timer: null, run: 0, touched: false, found: null, notFound: '', openedDef: '' };
+
+function fillBookSelect(select, selectedId) {
+  const books = state.books.slice().sort((a, b) =>
+    (a.status === 'reading' ? 0 : 1) - (b.status === 'reading' ? 0 : 1) || a.title.localeCompare(b.title, 'fr'));
+  select.innerHTML = '<option value="">Aucun livre</option>'
+    + books.map((b) => `<option value="${b.id}">${esc(b.title)}</option>`).join('');
+  select.value = selectedId && bookById(selectedId) ? selectedId : '';
+}
+
+/* Livre proposé : celui de la fiche ouverte, du filtre, ou l'unique livre en cours. */
+function defaultWordBook() {
+  if (state.route === 'book' && bookById(state.currentBookId)) return state.currentBookId;
+  if (state.route === 'words' && state.wordsBook && bookById(state.wordsBook)) return state.wordsBook;
+  const reading = state.books.filter((b) => b.status === 'reading');
+  return reading.length === 1 ? reading[0].id : '';
+}
+
+function syncWordBookUI(prefillPage) {
+  const form = $('#form-word');
+  const book = bookById(form.bookId.value);
+  $('#word-page-label').textContent = book && book.type === 'podcast' ? 'Minute' : 'Page';
+  if (prefillPage && form.page.value === '' && book && book.currentPage > 0) form.page.value = book.currentPage;
+}
+
+function setDefStatus(html, busy = false) {
+  const el = $('#def-status');
+  el.innerHTML = html;
+  el.classList.toggle('busy', busy);
+}
+
+function setDefSource(text) { $('#def-source').textContent = text ? '· ' + text : ''; }
+
+function renderDicoLinks() {
+  const term = $('#form-word').text.value.trim();
+  const pref = preferredDico();
+  const keys = [pref, ...Object.keys(DICTIONARIES).filter((k) => k !== pref)];
+  $('#dico-links').innerHTML = term
+    ? keys.map((k) => `<a class="dico-link${k === pref ? ' preferred' : ''}" href="${esc(dicoURL(term, k))}" target="_blank" rel="noopener">${esc(DICTIONARIES[k].label)} ↗</a>`).join('')
+    : '';
+}
+
+function updateDupHint() {
+  const n = normWord($('#form-word').text.value);
+  const dup = n && state.words.find((w) => w.id !== state.editing.wordId && normWord(w.text) === n);
+  const el = $('#word-dup');
+  el.hidden = !dup;
+  if (!dup) return;
+  const book = dup.bookId ? bookById(dup.bookId) : null;
+  el.innerHTML = `Déjà noté le ${esc(fmtShortDate(dup.createdAt))}${book ? ' (' + esc(book.title) + ')' : ''} · `
+    + `<button type="button" class="link-btn" data-open-word="${dup.id}">Voir</button>`;
+}
+
+function openWordForm(word = null, bookId) {
+  const form = $('#form-word');
+  form.reset();
+  clearTimeout(wl.timer);
+  wl.run++;
+  wl.found = null;
+  wl.notFound = '';
+  state.editing.wordId = word ? word.id : null;
+  fillBookSelect(form.bookId, word ? word.bookId : (bookId !== undefined ? bookId : defaultWordBook()));
+  form.text.value = word ? word.text : '';
+  form.definition.value = word ? (word.definition || '') : '';
+  wl.openedDef = form.definition.value;
+  wl.touched = Boolean(word && word.definition && word.defSource === 'perso');
+  form.context.value = word ? (word.context || '') : '';
+  form.page.value = word && word.page != null ? word.page : '';
+  syncWordBookUI(!word);
+  $('#sheet-word-title').textContent = word ? 'Modifier le mot' : 'Nouveau mot';
+  setDefSource(word && word.definition ? (word.defSource === 'perso' ? 'votre définition' : 'Wiktionnaire') : '');
+  setDefStatus(word && !word.definition && word.defStatus === 'none' ? 'Aucune définition trouvée sur le Wiktionnaire.' : '');
+  renderDicoLinks();
+  updateDupHint();
+  $('#btn-delete-word').hidden = !word;
+  openSheet('#sheet-word');
+  if (!word) form.text.focus({ preventScroll: true });
+  else if (!word.definition && word.defStatus !== 'none') runWordLookup(word.text);
+}
+
+function scheduleWordLookup() {
+  clearTimeout(wl.timer);
+  const term = $('#form-word').text.value.trim();
+  if (!term) { wl.run++; setDefStatus(''); return; }
+  if (term.length < 2 || wl.touched) return;
+  wl.timer = setTimeout(() => runWordLookup(term), 650);
+}
+
+/* Cherche la définition pendant la saisie ; « force » (bouton Rechercher,
+   suggestion) remplace aussi une définition écrite à la main. */
+async function runWordLookup(term, force = false) {
+  const form = $('#form-word');
+  if (wl.touched && !force) return;
+  clearTimeout(wl.timer);
+  const run = ++wl.run;
+  if (!navigator.onLine) {
+    setDefStatus('Hors ligne : la définition sera cherchée au retour du réseau.');
+    return;
+  }
+  setDefStatus('Recherche de la définition…', true);
+  try {
+    const res = await lookupDefinition(term);
+    if (run !== wl.run) return;
+    if (res) {
+      wl.found = res;
+      wl.notFound = '';
+      wl.touched = false;
+      form.definition.value = res.text;
+      setDefSource('Wiktionnaire');
+      setDefStatus('');
+      return;
+    }
+    wl.found = null;
+    wl.notFound = normWord(term);
+    if (!wl.touched) { form.definition.value = ''; setDefSource(''); }
+    setDefStatus('Aucune définition trouvée sur le Wiktionnaire.');
+    const sug = await wiktSuggest(term).catch(() => null);
+    if (run !== wl.run || !sug) return;
+    setDefStatus(`Aucune définition trouvée. Vouliez-vous dire <button type="button" class="link-btn" data-suggest="${esc(sug)}">${esc(sug)}</button> ?`);
+  } catch {
+    if (run === wl.run) setDefStatus('Définition indisponible pour le moment (réseau) : elle sera cherchée plus tard.');
+  }
+}
+
+/* Une citation ou un mot plus loin que la page notée fait avancer la lecture. */
+async function advanceProgress(book, page, now) {
+  if (!book || page == null || book.status === 'done') return null;
+  const target = book.totalPages ? Math.min(page, book.totalPages) : page;
+  if (target <= (book.currentPage || 0)) return null;
+  book.currentPage = target;
+  if (book.status === 'toread') {
+    book.status = 'reading';
+    if (!book.startDate) book.startDate = todayISO();
+  }
+  book.updatedAt = now;
+  await db.put('books', book);
+  return target;
+}
+
+const progressNote = (book, p) => (p == null ? '' : ` · progression : ${book.type === 'podcast' ? p + ' min' : 'p. ' + p}`);
+
+async function saveWordForm(e) {
+  e.preventDefault();
+  const form = $('#form-word');
+  const text = form.text.value.trim().replace(/\s+/g, ' ');
+  if (!text) { form.text.focus(); toast('Écrivez le mot ou l’expression'); return; }
+  const now = new Date().toISOString();
+  let word = state.editing.wordId ? state.words.find((w) => w.id === state.editing.wordId) : null;
+  const isNew = !word;
+  if (!word) word = { id: uid(), createdAt: now, definition: '', defSource: '' };
+  const sameWord = normWord(word.text) === normWord(text);
+  const def = form.definition.value.trim();
+  if (def) {
+    const fromWikt = wl.found && def === wl.found.text.trim();
+    const unchanged = def === (word.definition || '').trim();
+    word.defSource = fromWikt ? 'wiktionnaire' : (unchanged && word.defSource ? word.defSource : 'perso');
+    if (fromWikt) word.defTitle = wl.found.title;
+    word.definition = def;
+    word.defStatus = 'ok';
+  } else if (wl.openedDef.trim()) {
+    // Définition effacée volontairement : on ne la recherche plus d'office.
+    Object.assign(word, { definition: '', defSource: '', defStatus: 'none' });
+  } else if (!(sameWord && word.definition)) {
+    // (sinon : définition arrivée en arrière-plan pendant la saisie, on la garde)
+    Object.assign(word, { definition: '', defSource: '', defStatus: wl.notFound === normWord(text) ? 'none' : undefined });
+  }
+  word.text = text;
+  word.context = form.context.value.trim();
+  word.bookId = form.bookId.value || null;
+  word.page = form.page.value === '' ? null : Math.max(0, parseInt(form.page.value, 10) || 0);
+  word.updatedAt = now;
+  if (isNew) state.words.push(word);
+  await db.put('words', word);
+
+  const book = word.bookId ? bookById(word.bookId) : null;
+  const progressed = await advanceProgress(book, word.page, now);
+  closeSheet();
+  if (state.route === 'book' && book && state.currentBookId === book.id) state.bookTab = 'words';
+  toast((isNew ? 'Mot noté' : 'Mot enregistré') + progressNote(book, progressed));
+  render();
+  if (!word.definition && word.defStatus === undefined) fillMissingDefinitions();
+}
+
+async function deleteWord(id) {
+  const word = state.words.find((w) => w.id === id);
+  if (!word) return;
+  await db.remove('words', id);
+  state.words = state.words.filter((w) => w.id !== id);
+  render();
+  toast('Mot supprimé', {
+    label: 'Annuler',
+    run: async () => {
+      await db.put('words', word);
+      if (!state.words.some((w) => w.id === word.id)) state.words.push(word);
+      render();
+    }
+  });
+}
+
+/* Définitions manquantes (mot noté hors ligne…) : cherchées en arrière-plan
+   au démarrage, au retour du réseau et au retour dans l'app. */
+let fillingDefs = false;
+async function fillMissingDefinitions() {
+  if (fillingDefs || !navigator.onLine) return;
+  const todo = state.words.filter((w) => !w.definition && !w.defStatus);
+  if (!todo.length) return;
+  fillingDefs = true;
+  try {
+    for (const w of todo.slice(0, 15)) {
+      let res;
+      try { res = await lookupDefinition(w.text); } catch { break; } // réseau : plus tard
+      if (!state.words.includes(w) || w.definition || w.defStatus) continue;
+      if (res) Object.assign(w, { definition: res.text, defSource: 'wiktionnaire', defTitle: res.title, defStatus: 'ok' });
+      else w.defStatus = 'none';
+      await db.put('words', w);
+      if (state.route === 'words' || (state.route === 'book' && state.bookTab === 'words')) refresh(render);
+    }
+  } finally {
+    fillingDefs = false;
+  }
+}
+
+/* ═══════════ MONDE CACHÉ ═══════════
+   Cinq touchers sur le titre « Mots » : un texte où l'on ne parle qu'avec
+   les mots notés, au hasard. Ça ne veut rien dire, et c'est le but. */
+
+let secretTaps = [];
+let secretPlain = '';
+
+function onWordsTitleTap() {
+  const now = Date.now();
+  secretTaps = secretTaps.filter((t) => now - t < 1800);
+  secretTaps.push(now);
+  const title = $('#words-title');
+  if (secretTaps.length >= 3) {
+    title.classList.remove('wobble');
+    void title.offsetWidth; // rejoue l'animation
+    title.classList.add('wobble');
+  }
+  if (secretTaps.length >= 5) {
+    secretTaps = [];
+    openSecretWorld();
+  }
+}
+
+function makeNonsense(pool) {
+  const rnd = (n) => Math.floor(Math.random() * n);
+  const pick = (avoid) => {
+    let w = pool[rnd(pool.length)];
+    for (let g = 0; g < 8 && w === avoid && pool.length > 1; g++) w = pool[rnd(pool.length)];
+    return w;
+  };
+  const ENDS = ['.', '.', '.', '…', ' !', ' ?'];
+  const paras = [];
+  for (let p = 0; p < 2; p++) {
+    const sentences = [];
+    const nSent = 2 + rnd(3);
+    for (let s = 0; s < nSent; s++) {
+      const len = 3 + rnd(5);
+      const toks = [];
+      let prev = null;
+      for (let i = 0; i < len; i++) {
+        const w = pick(prev);
+        prev = w;
+        if (i > 0) toks.push({ text: i > 1 && Math.random() < 0.2 ? ', ' : ' ' });
+        toks.push({ text: i === 0 ? capFirst(w.text.trim()) : w.text.trim(), word: w });
+      }
+      toks.push({ text: ENDS[rnd(ENDS.length)] });
+      sentences.push(toks);
+    }
+    paras.push(sentences);
+  }
+  return paras;
+}
+
+function renderSecretText() {
+  const pool = state.words.filter((w) => w.text.trim());
+  const el = $('#secret-text');
+  const enough = pool.length >= 3;
+  $('#secret-again').hidden = !enough;
+  $('#secret-copy').hidden = !enough;
+  if (!enough) {
+    el.innerHTML = '<p class="secret-empty">Ce monde est encore désert… Notez au moins trois mots pour lui donner vie.</p>';
+    secretPlain = '';
+    return;
+  }
+  const paras = makeNonsense(pool);
+  let k = 0;
+  el.innerHTML = paras.map((sentences) => '<p>' + sentences.map((toks) => toks.map((t) => (t.word
+    ? `<span class="sw" data-id="${t.word.id}" style="animation-delay:${Math.min(k++ * 70, 4000)}ms">${esc(t.text)}</span>`
+    : esc(t.text))).join('')).join(' ') + '</p>').join('');
+  secretPlain = paras.map((sentences) => sentences.map((toks) => toks.map((t) => t.text).join('')).join(' ')).join('\n\n');
+}
+
+function openSecretWorld() {
+  hideToast();
+  const el = $('#secret');
+  el.hidden = false;
+  el.scrollTop = 0;
+  document.documentElement.classList.add('secret-open');
+  renderSecretText();
+}
+
+function closeSecretWorld() {
+  $('#secret').hidden = true;
+  document.documentElement.classList.remove('secret-open');
+}
+
 /* ═══════════ EXPORTS ═══════════ */
 
 function quoteBlock(q, isPodcast) {
@@ -1130,7 +1806,20 @@ function bookMarkdown(book) {
     lines.push('### Citations', '');
     for (const q of quotes) lines.push(quoteBlock(q, pod), '');
   }
+  const words = wordsOf(book.id);
+  if (words.length) {
+    lines.push('### Mots', '');
+    for (const w of words) lines.push(wordLine(w, pod));
+    lines.push('');
+  }
   return lines.join('\n');
+}
+
+/* « - **sibyllin** (p. 42) — Relatif aux sibylles ; obscur, énigmatique. » */
+function wordLine(w, isPodcast) {
+  const where = w.page != null ? ` (${isPodcast ? `à ${w.page} min` : 'p. ' + w.page})` : '';
+  const def = defOneLine(w);
+  return `- **${w.text}**${where}${def ? ' — ' + def : ''}`;
 }
 
 function exportMarkdown(book = null) {
@@ -1140,16 +1829,36 @@ function exportMarkdown(book = null) {
     md = `# ${book.title}\n\n` + bookMarkdown(book).split('\n').slice(2).join('\n');
     filename = book.title.replace(/[^\p{L}\p{N}]+/gu, '-').replace(/^-|-$/g, '').toLowerCase() || 'livre';
   } else {
-    const parts = [`# Ma bibliothèque`, ``, `_Export du ${fmtDate(todayISO())} — ${state.books.length} titres, ${state.quotes.length} citations, ${state.notes.length} notes._`, ''];
+    const parts = [`# Ma bibliothèque`, ``, `_Export du ${fmtDate(todayISO())} — ${state.books.length} titres, ${state.quotes.length} citations, ${state.notes.length} notes, ${state.words.length} mots._`, ''];
     for (const status of STATUS_ORDER) {
       const group = state.books.filter((b) => b.status === status)
         .sort((a, b) => a.title.localeCompare(b.title, 'fr'));
       for (const b of group) parts.push(bookMarkdown(b), '---', '');
     }
+    const loose = state.words.filter((w) => !w.bookId || !bookById(w.bookId)).sort(byAlpha);
+    if (loose.length) parts.push('## Mots sans livre', '', ...loose.map((w) => wordLine(w, false)), '');
     md = parts.join('\n');
     filename = 'bibliotheque';
   }
   shareOrDownload(`${filename}-${todayISO()}.md`, md, 'text/markdown');
+}
+
+/* Lexique complet, par ordre alphabétique, pour réviser. */
+function exportWordsMarkdown() {
+  if (!state.words.length) { toast('Aucun mot noté pour le moment'); return; }
+  const words = state.words.slice().sort(byAlpha);
+  const lines = ['# Mes mots', '', `_Export du ${fmtDate(todayISO())} — ${words.length} mot${words.length > 1 ? 's' : ''}._`, ''];
+  let letter = null;
+  for (const w of words) {
+    const L = wordLetter(w);
+    if (L !== letter) { lines.push(`## ${L}`, ''); letter = L; }
+    const book = w.bookId ? bookById(w.bookId) : null;
+    const src = [book && book.title, w.page != null && (book && book.type === 'podcast' ? `à ${w.page} min` : 'p. ' + w.page)].filter(Boolean).join(', ');
+    lines.push(`### ${w.text}${src ? ` — _${src}_` : ''}`, '');
+    if (w.definition) lines.push(w.definition, '');
+    if (w.context) lines.push(`> ${cleanContext(w.context)}`, '');
+  }
+  shareOrDownload(`mes-mots-${todayISO()}.md`, lines.join('\n'), 'text/markdown');
 }
 
 async function exportJSON() {
@@ -1184,7 +1893,7 @@ async function importJSONFile(file) {
   try {
     const data = JSON.parse(await file.text());
     if (!Array.isArray(data.books)) throw new Error('format');
-    const summary = `${data.books.length} titres, ${(data.quotes || []).length} citations, ${(data.notes || []).length} notes`;
+    const summary = `${data.books.length} titres, ${(data.quotes || []).length} citations, ${(data.notes || []).length} notes, ${(data.words || []).length} mots`;
     if (!confirm(`Restaurer cette sauvegarde (${summary}) ?\nLes données actuelles seront remplacées.`)) return;
     await db.importAll(data);
     await loadState();
@@ -1920,9 +2629,10 @@ function bindEvents() {
   });
 
   // Notes et citations : toucher pour modifier, glisser pour supprimer
-  for (const list of [$('#quotes-list'), $('#book-tab-content')]) {
+  for (const list of [$('#quotes-list'), $('#book-tab-content'), $('#words-list')]) {
     bindSwipeToDelete(list);
     list.addEventListener('click', (e) => {
+      if (e.target.closest('a')) return; // lien vers le dictionnaire
       if (Date.now() - swipeEndedAt < 450) return;
       const source = e.target.closest('.qsource');
       if (source) {
@@ -1936,7 +2646,7 @@ function bindEvents() {
     });
     list.addEventListener('keydown', (e) => {
       const card = e.target.closest('.swipeable');
-      if (card && (e.key === 'Enter' || e.key === ' ')) {
+      if (card && e.target === card && (e.key === 'Enter' || e.key === ' ')) {
         e.preventDefault();
         openEntry(card.dataset.kind, card.dataset.id);
       }
@@ -1954,6 +2664,85 @@ function bindEvents() {
   });
   $('#btn-add-quote').addEventListener('click', () => openQuoteForm(null, state.currentBookId));
   $('#btn-add-note').addEventListener('click', () => openNoteForm(null, state.currentBookId));
+  $('#btn-add-word-book').addEventListener('click', () => openWordForm(null, state.currentBookId));
+
+  // Mots : liste, tri, filtres, dictionnaire préféré
+  $('#btn-add-word').addEventListener('click', () => openWordForm());
+  $('#words-title').addEventListener('click', onWordsTitleTap);
+  $('#words-search').addEventListener('input', (e) => {
+    state.wordsQuery = e.target.value;
+    refresh(renderWordsView);
+  });
+  $('#words-sort').addEventListener('click', (e) => {
+    const chip = e.target.closest('.chip');
+    if (!chip) return;
+    state.wordsSort = chip.dataset.sort;
+    try { localStorage.setItem(WORDS_SORT_KEY, state.wordsSort); } catch { /* sans importance */ }
+    refresh(renderWordsView);
+  });
+  $('#words-book-filter').addEventListener('change', (e) => {
+    state.wordsBook = e.target.value;
+    refresh(renderWordsView);
+  });
+  $('#dico-select').addEventListener('change', (e) => {
+    setPreferredDico(e.target.value);
+    refresh(renderWordsView);
+  });
+
+  // Fiche d'un mot
+  const wordForm = $('#form-word');
+  wordForm.addEventListener('submit', saveWordForm);
+  wordForm.text.addEventListener('input', () => {
+    updateDupHint();
+    renderDicoLinks();
+    scheduleWordLookup();
+  });
+  wordForm.definition.addEventListener('input', () => {
+    const v = wordForm.definition.value.trim();
+    wl.touched = Boolean(v) && !(wl.found && v === wl.found.text.trim());
+    setDefSource(v ? (wl.touched ? 'votre définition' : 'Wiktionnaire') : '');
+  });
+  wordForm.bookId.addEventListener('change', () => syncWordBookUI(true));
+  $('#def-refresh').addEventListener('click', () => {
+    const term = wordForm.text.value.trim();
+    if (!term) { wordForm.text.focus(); return; }
+    runWordLookup(term, true);
+  });
+  $('#def-status').addEventListener('click', (e) => {
+    const b = e.target.closest('[data-suggest]');
+    if (!b) return;
+    wordForm.text.value = b.dataset.suggest;
+    updateDupHint();
+    renderDicoLinks();
+    runWordLookup(b.dataset.suggest, true);
+  });
+  $('#word-dup').addEventListener('click', (e) => {
+    const b = e.target.closest('[data-open-word]');
+    const word = b && state.words.find((w) => w.id === b.dataset.openWord);
+    if (word) openWordForm(word);
+  });
+  $('#btn-delete-word').addEventListener('click', () => {
+    const id = state.editing.wordId;
+    closeSheet({ discard: true });
+    if (id) deleteWord(id);
+  });
+
+  // Monde caché
+  $('#secret-again').addEventListener('click', renderSecretText);
+  $('#secret-exit').addEventListener('click', closeSecretWorld);
+  $('#secret-copy').addEventListener('click', async () => {
+    try {
+      await navigator.clipboard.writeText(secretPlain);
+      toast('Texte copié');
+    } catch {
+      toast('Copie impossible sur cet appareil');
+    }
+  });
+  $('#secret-text').addEventListener('click', (e) => {
+    const span = e.target.closest('.sw');
+    const word = span && state.words.find((w) => w.id === span.dataset.id);
+    if (word) toast(`${word.text} : ${defOneLine(word) || 'sens inconnu… même ici.'}`);
+  });
   $('#btn-export-book').addEventListener('click', () => exportMarkdown(bookById(state.currentBookId)));
 
   // Stats / données
@@ -1961,6 +2750,7 @@ function bindEvents() {
     if (!state.books.length) { toast('Rien à exporter pour le moment'); return; }
     exportMarkdown();
   });
+  $('#btn-export-words').addEventListener('click', exportWordsMarkdown);
   $('#btn-export-json').addEventListener('click', exportJSON);
   $('#btn-update-app').addEventListener('click', forceUpdate);
   $('#btn-import-json').addEventListener('click', () => $('#import-file').click());
@@ -2067,9 +2857,13 @@ function bindEvents() {
 
   document.addEventListener('keydown', (e) => {
     if (e.key !== 'Escape') return;
-    if (!$('#cropper').hidden) closeCropper();
+    if (!$('#secret').hidden) closeSecretWorld();
+    else if (!$('#cropper').hidden) closeCropper();
     else closeSheet();
   });
+
+  // Définitions manquantes : au retour du réseau
+  window.addEventListener('online', fillMissingDefinitions);
 
   // Clavier iOS : la feuille suit la zone visible.
   if (window.visualViewport) {
@@ -2085,13 +2879,17 @@ function bindEvents() {
 /* ═══════════ DÉMARRAGE ═══════════ */
 
 async function loadState() {
-  [state.books, state.notes, state.quotes] = await Promise.all(
-    ['books', 'notes', 'quotes'].map((s) => db.getAll(s))
+  [state.books, state.notes, state.quotes, state.words] = await Promise.all(
+    ['books', 'notes', 'quotes', 'words'].map((s) => db.getAll(s))
   );
 }
 
 async function init() {
   await loadState();
+  try {
+    const sort = localStorage.getItem(WORDS_SORT_KEY);
+    if (['recent', 'old', 'az', 'za', 'book'].includes(sort)) state.wordsSort = sort;
+  } catch { /* stockage bloqué */ }
   bindEvents();
   router();
   $('#version-line').textContent = 'Lecture — version ' + APP_VERSION;
@@ -2100,6 +2898,12 @@ async function init() {
   if (navigator.storage && navigator.storage.persist) {
     navigator.storage.persist().catch(() => {});
   }
+
+  // Mots notés hors ligne : définitions cherchées au démarrage et au retour dans l'app.
+  setTimeout(fillMissingDefinitions, 2000);
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') fillMissingDefinitions();
+  });
 
   if ('serviceWorker' in navigator) {
     // updateViaCache:'none' : sw.js toujours revérifié sur le réseau.

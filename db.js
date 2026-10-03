@@ -1,9 +1,10 @@
 /* Couche de persistance : IndexedDB avec une petite API en promesses.
-   Trois magasins : books, notes, quotes (notes et quotes indexés par bookId). */
+   Quatre magasins : books, notes, quotes, words (vocabulaire) ; les trois
+   derniers sont indexés par bookId. La version 2 ajoute « words ». */
 
 const DB_NAME = 'lecture-db';
-const DB_VERSION = 1;
-export const STORES = ['books', 'notes', 'quotes'];
+const DB_VERSION = 2;
+export const STORES = ['books', 'notes', 'quotes', 'words'];
 
 let dbPromise = null;
 
@@ -24,8 +25,17 @@ function open() {
         const s = db.createObjectStore('quotes', { keyPath: 'id' });
         s.createIndex('bookId', 'bookId');
       }
+      if (!db.objectStoreNames.contains('words')) {
+        const s = db.createObjectStore('words', { keyPath: 'id' });
+        s.createIndex('bookId', 'bookId');
+      }
     };
-    req.onsuccess = () => resolve(req.result);
+    req.onsuccess = () => {
+      const db = req.result;
+      // Une version plus récente de l'app demande la base : on la libère.
+      db.onversionchange = () => { db.close(); dbPromise = null; };
+      resolve(db);
+    };
     req.onerror = () => reject(req.error);
   });
   return dbPromise;
@@ -91,8 +101,8 @@ export async function putMany(data) {
 }
 
 export async function exportAll() {
-  const [books, notes, quotes] = await Promise.all(STORES.map(getAll));
-  return { app: 'lecture', version: 1, exportedAt: new Date().toISOString(), books, notes, quotes };
+  const [books, notes, quotes, words] = await Promise.all(STORES.map(getAll));
+  return { app: 'lecture', version: 2, exportedAt: new Date().toISOString(), books, notes, quotes, words };
 }
 
 /* Remplace l'intégralité des données (utilisé par l'import JSON). */
