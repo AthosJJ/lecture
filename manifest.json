@@ -1,7 +1,7 @@
 {
   "name": "Lecture — Ma bibliothèque",
   "short_name": "Lecture",
-  "description": "Liste de lecture avec notes et citations, hors ligne.",
+  "description": "Liste de lecture avec notes, citations et mots, sur tous vos appareils, même hors ligne.",
   "lang": "fr",
   "start_url": "./",
   "scope": "./",

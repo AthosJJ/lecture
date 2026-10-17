@@ -1163,3 +1163,81 @@ html.secret-open, html.secret-open body { overflow: hidden; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: .01ms !important; transition-duration: .01ms !important; }
 }
+
+/* ——— Démarrage et connexion ———
+   L'app n'apparaît qu'une fois la session ouverte et les données chargées. */
+html.booting #app, html.signed-out #app { display: none; }
+
+.splash {
+  position: fixed; inset: 0;
+  display: grid; place-items: center;
+  background: var(--bg);
+  z-index: 100;
+  transition: opacity .3s var(--ease);
+}
+.splash.gone { opacity: 0; pointer-events: none; }
+.splash-icon { width: 84px; height: 84px; border-radius: 19px; box-shadow: var(--shadow); animation: splashIn .5s var(--ease) both; }
+@keyframes splashIn { from { opacity: 0; transform: scale(.92); } to { opacity: 1; transform: none; } }
+.splash-msg { max-width: 320px; padding: 24px; text-align: center; }
+.splash-msg h2 { font-size: 22px; font-weight: 800; letter-spacing: -0.02em; margin-bottom: 8px; }
+.splash-msg p { color: var(--muted); margin-bottom: 18px; }
+
+.login {
+  min-height: 100dvh;
+  display: flex; justify-content: center;
+  padding: calc(env(safe-area-inset-top) + 48px) 22px calc(env(safe-area-inset-bottom) + 28px);
+}
+.login-wrap { width: 100%; max-width: 400px; }
+.login-icon { display: block; width: 72px; height: 72px; border-radius: 16px; box-shadow: var(--shadow); margin: 0 auto 14px; }
+.login-title { text-align: center; font-size: 32px; font-weight: 800; letter-spacing: -0.03em; }
+.login-sub { text-align: center; color: var(--muted); font-size: 15.5px; margin-top: 4px; }
+.login-note {
+  margin-top: 16px;
+  padding: 12px 14px;
+  border-radius: 12px;
+  background: var(--accent-soft);
+  color: var(--ink);
+  font-size: 14px;
+}
+.login .segmented { margin: 22px 0 16px; }
+.pw-wrap { position: relative; display: block; }
+.pw-wrap input { padding-right: 84px; }
+.pw-toggle {
+  position: absolute; right: 6px; top: 50%; transform: translateY(-50%);
+  padding: 6px 10px;
+  color: var(--accent); font-size: 14px; font-weight: 600;
+}
+.pw-toggle:active { opacity: .5; }
+.pw-hint { display: block; margin-top: 6px; font-size: 12.5px; color: var(--muted); }
+.login-msg { min-height: 1.2em; margin: 2px 2px 8px; font-size: 14px; font-weight: 500; color: var(--danger); }
+.login-msg.ok { color: #248A3D; }
+@media (prefers-color-scheme: dark) { .login-msg.ok { color: #30D158; } }
+.login .primary-btn:disabled { opacity: .6; }
+.login-forgot { display: block; margin: 14px auto 0; font-size: 15px; }
+.login-foot { margin-top: 26px; text-align: center; font-size: 13px; color: var(--muted); }
+
+/* ——— Import de l'ancienne version (haut de la bibliothèque) ——— */
+.import-card {
+  padding: 16px;
+  margin-bottom: 16px;
+  border: 1px solid var(--accent-soft);
+}
+.import-title { font-weight: 700; font-size: 16px; letter-spacing: -0.01em; margin-bottom: 4px; }
+.import-text { font-size: 14.5px; color: var(--muted); margin-bottom: 12px; }
+.import-actions { display: flex; align-items: center; gap: 14px; }
+.import-actions .primary-btn { flex: 1; margin: 0; }
+.import-actions .primary-btn:disabled, .row-btn:disabled { opacity: .55; }
+
+/* ——— Réglages ——— */
+.settings-title { font-size: 30px; font-weight: 800; letter-spacing: -0.03em; margin: 4px 0 6px; }
+#view-settings .section-title { margin-top: 24px; }
+.settings-card { padding: 14px 16px; margin-bottom: 8px; animation: none; }
+.account-email { font-weight: 600; font-size: 16px; word-break: break-all; }
+.sync-line { font-size: 13.5px; color: #248A3D; margin-top: 2px; }
+.sync-line.warn { color: var(--star); }
+@media (prefers-color-scheme: dark) { .sync-line { color: #30D158; } }
+.row-btn.danger { color: var(--danger); }
+.credits { padding: 14px 16px; font-size: 13.5px; color: var(--muted); animation: none; }
+.credits p + p { margin-top: 8px; }
+.credits b { color: var(--ink); font-weight: 600; }
+.credits a, .def-source a { color: var(--accent); text-decoration: none; }

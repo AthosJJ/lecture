@@ -1,10 +1,10 @@
 <!doctype html>
-<html lang="fr">
+<html lang="fr" class="booting">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
   <title>Lecture</title>
-  <meta name="description" content="Ma liste de lecture — notes et citations, hors ligne.">
+  <meta name="description" content="Ma liste de lecture — notes, citations et mots, sur tous mes appareils, même hors ligne.">
 
   <meta name="theme-color" content="#F5F5F7" media="(prefers-color-scheme: light)">
   <meta name="theme-color" content="#000000" media="(prefers-color-scheme: dark)">
@@ -18,8 +18,62 @@
   <meta name="apple-mobile-web-app-title" content="Lecture">
 
   <link rel="stylesheet" href="./styles.css">
+  <script>
+    /* Code de l'app introuvable (premier lancement sans réseau, CDN de
+       Firebase injoignable) : on le dit au lieu d'un écran vide. */
+    function bootFailed() {
+      var s = document.getElementById('splash');
+      if (!s) return;
+      s.classList.add('failed');
+      s.innerHTML = '<div class="splash-msg"><h2>Chargement impossible</h2>'
+        + '<p>Vérifiez votre connexion, puis réessayez.</p>'
+        + '<button type="button" class="primary-btn" onclick="location.reload()">Réessayer</button></div>';
+    }
+    /* Garde-fou : ni connexion ni app au bout de 20 s, le démarrage a échoué. */
+    setTimeout(function () {
+      var login = document.getElementById('login');
+      if (document.documentElement.classList.contains('booting') && login && login.hidden) bootFailed();
+    }, 20000);
+  </script>
 </head>
 <body>
+  <!-- Démarrage : le temps d'ouvrir la session et les données -->
+  <div class="splash" id="splash" aria-hidden="true">
+    <img class="splash-icon" src="./icons/icon-192.png" alt="" width="84" height="84">
+  </div>
+
+  <!-- Connexion : e-mail et mot de passe -->
+  <section class="login" id="login" aria-label="Connexion" hidden>
+    <div class="login-wrap">
+      <img class="login-icon" src="./icons/icon-192.png" alt="" width="72" height="72">
+      <h1 class="login-title">Lecture</h1>
+      <p class="login-sub">Vos livres, citations, notes et mots, sur tous vos appareils.</p>
+      <p class="login-note" id="login-legacy" hidden></p>
+      <div class="segmented" id="login-mode" role="group" aria-label="Se connecter ou créer un compte">
+        <button type="button" class="seg-btn active" data-mode="signin" aria-pressed="true">Se connecter</button>
+        <button type="button" class="seg-btn" data-mode="signup" aria-pressed="false">Créer un compte</button>
+      </div>
+      <form id="form-login" novalidate>
+        <label class="field">
+          <span>Adresse e-mail</span>
+          <input type="email" name="email" autocomplete="username" inputmode="email" autocapitalize="off" autocorrect="off" spellcheck="false" enterkeyhint="next" placeholder="prenom@exemple.fr">
+        </label>
+        <label class="field">
+          <span>Mot de passe</span>
+          <span class="pw-wrap">
+            <input type="password" name="password" autocomplete="current-password" enterkeyhint="go">
+            <button type="button" class="pw-toggle" id="pw-toggle" aria-label="Afficher le mot de passe">Afficher</button>
+          </span>
+          <small class="pw-hint" id="pw-hint" hidden>8 caractères minimum.</small>
+        </label>
+        <p class="login-msg" id="login-msg" role="alert"></p>
+        <button type="submit" class="primary-btn" id="login-submit">Se connecter</button>
+        <button type="button" class="text-btn login-forgot" id="login-forgot">Mot de passe oublié ?</button>
+      </form>
+      <p class="login-foot">Vous avez un compte À tester ? Connectez-vous avec les mêmes identifiants.</p>
+    </div>
+  </section>
+
   <div id="app">
 
     <!-- ÉCRAN : Bibliothèque -->
@@ -33,6 +87,14 @@
       <div class="search-wrap">
         <svg class="search-ico" viewBox="0 0 20 20" width="16" height="16" aria-hidden="true"><circle cx="8.5" cy="8.5" r="5.5" stroke="currentColor" stroke-width="1.8" fill="none"/><path d="M13 13l4 4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
         <input id="search-input" type="search" placeholder="Titre, auteur, note, citation…" autocomplete="off" enterkeyhint="search">
+      </div>
+      <div class="card import-card" id="import-card" hidden>
+        <p class="import-title">Vos données de l’ancienne version</p>
+        <p class="import-text" id="import-card-text"></p>
+        <div class="import-actions">
+          <button type="button" class="primary-btn small" id="import-card-go">Importer mes données locales</button>
+          <button type="button" class="link-btn muted" id="import-card-later">Plus tard</button>
+        </div>
       </div>
       <div class="chips" id="library-tags" hidden></div>
       <div id="library-list"></div>
@@ -86,22 +148,60 @@
       <div id="words-list"></div>
     </section>
 
-    <!-- ÉCRAN : Statistiques + données -->
+    <!-- ÉCRAN : Statistiques -->
     <section class="view" id="view-stats" aria-label="Statistiques">
       <header class="page-head">
         <h1>Statistiques</h1>
+        <button class="icon-btn" id="btn-settings" aria-label="Réglages">
+          <svg viewBox="0 0 24 24" width="21" height="21" aria-hidden="true" fill="none" stroke="currentColor"><circle cx="12" cy="12" r="5.6" stroke-width="2"/><circle cx="12" cy="12" r="2" stroke-width="1.8"/><path d="M12 2.6v3M12 18.4v3M2.6 12h3M18.4 12h3M5.35 5.35l2.1 2.1M16.55 16.55l2.1 2.1M5.35 18.65l2.1-2.1M16.55 7.45l2.1-2.1" stroke-width="3"/></svg>
+        </button>
       </header>
       <div id="stats-content"></div>
-      <div class="data-section">
-        <h2 class="section-title">Données</h2>
-        <button class="row-btn" id="btn-export-md">Exporter notes, citations &amp; mots (Markdown)</button>
-        <button class="row-btn" id="btn-export-words">Exporter mes mots (Markdown)</button>
-        <button class="row-btn" id="btn-export-json">Sauvegarder tout (JSON)</button>
-        <button class="row-btn" id="btn-import-json">Restaurer une sauvegarde (JSON)</button>
-        <button class="row-btn" id="btn-update-app">Rechercher une mise à jour</button>
-        <input type="file" id="import-file" accept="application/json,.json" hidden>
-        <p class="hint" id="version-line"></p>
+    </section>
+
+    <!-- ÉCRAN : Réglages (compte, données, mentions) -->
+    <section class="view view-push" id="view-settings" aria-label="Réglages">
+      <header class="page-head detail-head">
+        <button class="back-btn" id="btn-settings-back" aria-label="Retour aux statistiques">
+          <svg viewBox="0 0 20 20" width="18" height="18" aria-hidden="true"><path d="M12.5 4 6.5 10l6 6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" fill="none"/></svg>
+          <span>Stats</span>
+        </button>
+      </header>
+      <h1 class="settings-title">Réglages</h1>
+
+      <h2 class="section-title">Compte</h2>
+      <div class="card settings-card">
+        <p class="account-email" id="account-email"></p>
+        <p class="sync-line" id="sync-line"></p>
       </div>
+      <button class="row-btn danger" id="btn-logout">Se déconnecter</button>
+
+      <div id="legacy-section" hidden>
+        <h2 class="section-title">Ancienne version</h2>
+        <p class="hint" id="legacy-summary"></p>
+        <button class="row-btn" id="btn-import-local">Importer mes données locales</button>
+        <button class="row-btn" id="btn-clear-local" hidden>Vider l’ancien stockage</button>
+      </div>
+
+      <h2 class="section-title">Sauvegarde et exports</h2>
+      <button class="row-btn" id="btn-export-md">Exporter notes, citations &amp; mots (Markdown)</button>
+      <button class="row-btn" id="btn-export-words">Exporter mes mots (Markdown)</button>
+      <button class="row-btn" id="btn-export-json">Sauvegarder tout (JSON)</button>
+      <button class="row-btn" id="btn-import-json">Importer une sauvegarde (JSON)</button>
+      <input type="file" id="import-file" accept="application/json,.json" hidden>
+      <p class="hint">Vos données sont déjà dans votre compte : la sauvegarde JSON est facultative. L’import ajoute ou met à jour, sans doublon ni suppression.</p>
+
+      <h2 class="section-title">Mentions</h2>
+      <div class="card credits">
+        <p><b>Définitions</b> : <a href="https://fr.wiktionary.org/" target="_blank" rel="noopener">Wiktionnaire</a>, par ses contributeurs, sous licence <a href="https://creativecommons.org/licenses/by-sa/4.0/deed.fr" target="_blank" rel="noopener">CC BY-SA 4.0</a> ; extraits mis en forme par l’app. Dans la fiche d’un mot, « Wiktionnaire » ouvre la page d’origine.</p>
+        <p><b>CNRTL</b> : liens vers <a href="https://www.cnrtl.fr/" target="_blank" rel="noopener">cnrtl.fr</a>. Une définition collée depuis le CNRTL appartient à ses auteurs (ATILF, CNRS et Université de Lorraine) et reste pour votre usage personnel.</p>
+        <p><b>Reconnaissance de texte</b> : <a href="https://github.com/naptha/tesseract.js" target="_blank" rel="noopener">Tesseract.js</a> et Tesseract OCR, modèle français tessdata_best, sous licence Apache 2.0, sur l’appareil.</p>
+        <p><b>Comptes et données</b> : <a href="https://firebase.google.com/" target="_blank" rel="noopener">Firebase</a> (Google), SDK sous licence Apache 2.0.</p>
+      </div>
+
+      <h2 class="section-title">Application</h2>
+      <button class="row-btn" id="btn-update-app">Rechercher une mise à jour</button>
+      <p class="hint" id="version-line"></p>
     </section>
 
     <!-- ÉCRAN : Fiche d'un livre -->
@@ -438,6 +538,6 @@
   </div>
 
   <noscript><p style="padding:2rem;text-align:center">Cette application nécessite JavaScript.</p></noscript>
-  <script type="module" src="./app.js"></script>
+  <script type="module" src="./app.js" onerror="bootFailed()"></script>
 </body>
 </html>

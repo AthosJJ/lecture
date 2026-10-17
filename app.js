@@ -1,9 +1,13 @@
 import * as db from './db.js';
+import { watchAuth, currentUser, signIn, signUp, resetPassword, signOutUser, authMessage, MIN_PASSWORD } from './account.js';
+import { legacySummary, readLegacy, deleteLegacy } from './legacy.js';
+import { parseBackup, planImport, sendImport, verifyImport, describeCounts } from './importer.js';
 
 /* Synchroniser avec VERSION dans sw.js à chaque mise à jour. */
-const APP_VERSION = '13';
+const APP_VERSION = '14';
 
-/* ——— État en mémoire (rechargé depuis IndexedDB au démarrage) ——— */
+/* ——— État en mémoire : copie des données du compte, tenue à jour par la
+   synchronisation Firestore (db.js) ——— */
 const state = {
   books: [],
   notes: [],
@@ -151,6 +155,8 @@ function router() {
     state.route = 'words';
   } else if (hash === '#/stats') {
     state.route = 'stats';
+  } else if (hash === '#/settings') {
+    state.route = 'settings';
   } else {
     state.route = 'library';
   }
@@ -167,13 +173,15 @@ function render() {
 
   $$('.view').forEach((v) => v.classList.remove('active'));
   $('#tabbar').classList.toggle('hidden', r === 'book');
-  $$('.tab').forEach((t) => t.classList.toggle('active', t.dataset.route === r));
+  // Les réglages s'ouvrent depuis les statistiques : l'onglet Stats reste allumé.
+  $$('.tab').forEach((t) => t.classList.toggle('active', t.dataset.route === (r === 'settings' ? 'stats' : r)));
   $('#book-actions').hidden = r !== 'book';
 
   if (r === 'library') { $('#view-library').classList.add('active'); renderLibrary(); }
   if (r === 'quotes') { $('#view-quotes').classList.add('active'); renderQuotesView(); }
   if (r === 'words') { $('#view-words').classList.add('active'); renderWordsView(); }
   if (r === 'stats') { $('#view-stats').classList.add('active'); renderStats(); }
+  if (r === 'settings') { $('#view-settings').classList.add('active'); renderSettings(); }
   if (r === 'book') { $('#view-book').classList.add('active'); renderBook(); }
 
   if (!sameScreen) window.scrollTo(0, 0);
@@ -782,8 +790,9 @@ async function saveBookForm(e) {
     if (book.totalPages) book.currentPage = book.totalPages;
   }
 
-  await db.put('books', book);
+  // En mémoire d'abord : l'écho de la synchronisation trouve alors le livre.
   if (!existing) state.books.push(book);
+  await db.put('books', book);
   closeSheet();
   toast(existing ? 'Modifications enregistrées' : 'Ajouté à la bibliothèque');
   render();
@@ -798,8 +807,13 @@ async function deleteCurrentBook() {
   // Le vocabulaire survit au livre : ses mots passent « sans livre ».
   const words = wordsOf(book.id);
   for (const w of words) w.bookId = null;
-  if (words.length) await db.putMany({ words });
-  await db.removeBookCascade(book.id);
+  // Un seul lot : le livre, ses notes et citations partent, ses mots restent.
+  db.commit([
+    ...words.map((w) => ({ type: 'set', store: 'words', id: w.id, data: w })),
+    { type: 'delete', store: 'books', id: book.id },
+    ...notes.map((n) => ({ type: 'delete', store: 'notes', id: n.id })),
+    ...quotes.map((q) => ({ type: 'delete', store: 'quotes', id: q.id }))
+  ]);
   state.books = state.books.filter((b) => b.id !== book.id);
   state.notes = state.notes.filter((n) => n.bookId !== book.id);
   state.quotes = state.quotes.filter((q) => q.bookId !== book.id);
@@ -1136,6 +1150,7 @@ const WORDS_SORT_KEY = 'lecture-tri-mots';
 
 /* ——— Définitions du Wiktionnaire ——— */
 const WIKT_API = 'https://fr.wiktionary.org/w/api.php';
+const wiktURL = (title) => 'https://fr.wiktionary.org/wiki/' + encodeURIComponent(String(title).trim().replace(/ /g, '_'));
 const POS_LABELS = {
   nom: 'nom commun', adj: 'adjectif', adv: 'adverbe', verb: 'verbe', 'nom-pr': 'nom propre',
   'loc-phr': 'locution-phrase', prép: 'préposition', conj: 'conjonction', interj: 'interjection'
@@ -1448,7 +1463,7 @@ function renderWordsView() {
    automatiquement), 'perso' (écrite à la main) ou 'cnrtl' (collée depuis
    le CNRTL). Seule une définition du Wiktionnaire peut être remplacée par
    une nouvelle recherche automatique. */
-const wl = { timer: null, run: 0, found: null, notFound: '', openedDef: '', source: '', lastDico: '' };
+const wl = { timer: null, run: 0, found: null, notFound: '', openedDef: '', source: '', defTitle: '', lastDico: '' };
 const ws = { timer: null, run: 0, list: [], hidden: true }; // suggestions pendant la frappe
 
 const sourceLabel = (src) => SOURCE_LABELS[src] || '';
@@ -1487,7 +1502,18 @@ function setDefStatus(html, busy = false) {
   el.classList.toggle('busy', busy);
 }
 
-function setDefSource(text) { $('#def-source').textContent = text ? '· ' + text : ''; }
+/* Source affichée à côté de « Définition » ; celle du Wiktionnaire renvoie
+   à sa page d'origine (licence CC BY-SA : attribution et lien). */
+function setDefSource(src) {
+  const el = $('#def-source');
+  if (src === 'wiktionnaire') {
+    const title = (wl.found && wl.found.title) || wl.defTitle || $('#form-word').text.value.trim();
+    el.innerHTML = `· <a href="${esc(wiktURL(title))}" target="_blank" rel="noopener">Wiktionnaire</a>`;
+    return;
+  }
+  const label = sourceLabel(src);
+  el.textContent = label ? '· ' + label : '';
+}
 
 function renderCnrtlLink() {
   const term = $('#form-word').text.value.trim();
@@ -1696,11 +1722,12 @@ function openWordForm(word = null, bookId, opts = {}) {
   form.definition.value = word ? (word.definition || '') : '';
   wl.openedDef = form.definition.value;
   wl.source = word && word.definition ? (word.defSource || 'perso') : '';
+  wl.defTitle = word ? (word.defTitle || '') : '';
   form.context.value = word ? (word.context || '') : '';
   form.page.value = word && word.page != null ? word.page : '';
   syncWordBookUI(!word);
   $('#sheet-word-title').textContent = word ? 'Modifier le mot' : 'Nouveau mot';
-  setDefSource(sourceLabel(wl.source));
+  setDefSource(wl.source);
   setDefStatus(word && !word.definition && word.defStatus === 'none' ? 'Aucune définition trouvée sur le Wiktionnaire.' : '');
   renderCnrtlLink();
   updateDupHint();
@@ -1740,7 +1767,7 @@ async function runWordLookup(term, force = false) {
       wl.notFound = '';
       wl.source = 'wiktionnaire';
       form.definition.value = res.text;
-      setDefSource('Wiktionnaire');
+      setDefSource('wiktionnaire');
       setDefStatus('');
       renderWordSuggest();
       return;
@@ -2029,8 +2056,13 @@ function exportWordsMarkdown() {
   shareOrDownload(`mes-mots-${todayISO()}.md`, lines.join('\n'), 'text/markdown');
 }
 
-async function exportJSON() {
-  const data = await db.exportAll();
+/* Sauvegarde facultative : tout le compte, au format des versions
+   précédentes (réimportable sans doublon). */
+function exportJSON() {
+  const data = {
+    app: 'lecture', version: 2, exportedAt: new Date().toISOString(),
+    books: state.books, notes: state.notes, quotes: state.quotes, words: state.words
+  };
   shareOrDownload(`lecture-sauvegarde-${todayISO()}.json`, JSON.stringify(data, null, 2), 'application/json');
 }
 
@@ -2058,18 +2090,13 @@ async function shareOrDownload(name, content, mime) {
 }
 
 async function importJSONFile(file) {
-  try {
-    const data = JSON.parse(await file.text());
-    if (!Array.isArray(data.books)) throw new Error('format');
-    const summary = `${data.books.length} titres, ${(data.quotes || []).length} citations, ${(data.notes || []).length} notes, ${(data.words || []).length} mots`;
-    if (!confirm(`Restaurer cette sauvegarde (${summary}) ?\nLes données actuelles seront remplacées.`)) return;
-    await db.importAll(data);
-    await loadState();
-    render();
-    toast('Sauvegarde restaurée');
-  } catch {
-    alert('Fichier invalide : choisissez une sauvegarde JSON créée par cette application.');
-  }
+  let parsed;
+  try { parsed = parseBackup(await file.text()); } catch { parsed = { error: 'Fichier illisible.' }; }
+  if (parsed.error) { alert(parsed.error); return; }
+  const { data } = parsed;
+  const summary = describeCounts(Object.fromEntries(db.STORES.map((s) => [s, (data[s] || []).length])));
+  if (!confirm(`Importer cette sauvegarde (${summary}) dans votre compte ?\n\nRien n’est supprimé : un élément déjà présent garde sa version la plus récente.`)) return;
+  await importIntoAccount(data, 'file');
 }
 
 /* ═══════════ MISES À JOUR ═══════════
@@ -2867,7 +2894,7 @@ function bindEvents() {
     // une définition collée garde le nom de son dictionnaire.
     if (!wordForm.definition.value.trim()) wl.source = '';
     else if (!wl.source || wl.source === 'wiktionnaire') wl.source = 'perso';
-    setDefSource(sourceLabel(wl.source));
+    setDefSource(wl.source);
   });
   wordForm.bookId.addEventListener('change', () => {
     syncWordBookUI(true);
@@ -2896,7 +2923,7 @@ function bindEvents() {
     }
     wordForm.definition.value = text;
     wl.source = wl.lastDico === 'cnrtl' ? 'cnrtl' : 'perso';
-    setDefSource(sourceLabel(wl.source));
+    setDefSource(wl.source);
     setDefStatus('');
   });
   // CNRTL ouvert juste avant : la définition collée vient de là.
@@ -2966,7 +2993,20 @@ function bindEvents() {
   });
   $('#btn-export-book').addEventListener('click', () => exportMarkdown(bookById(state.currentBookId)));
 
-  // Stats / données
+  // Réglages : compte, ancienne version, sauvegarde et exports
+  $('#btn-settings').addEventListener('click', () => navigate('#/settings'));
+  $('#btn-settings-back').addEventListener('click', () => (history.length > 1 ? history.back() : navigate('#/stats')));
+  $('#btn-logout').addEventListener('click', logout);
+  $('#btn-import-local').addEventListener('click', importLocal);
+  $('#btn-clear-local').addEventListener('click', () => {
+    if (confirm('Vider l’ancien stockage de cet appareil ?\n\nVos données sont déjà dans votre compte : seule cette copie locale est supprimée.')) clearLegacy();
+  });
+  $('#import-card-go').addEventListener('click', importLocal);
+  $('#import-card-later').addEventListener('click', () => {
+    legacyCardLater = true;
+    renderImportCard();
+    toast('L’import reste possible depuis Stats › Réglages');
+  });
   $('#btn-export-md').addEventListener('click', () => {
     if (!state.books.length) { toast('Rien à exporter pour le moment'); return; }
     exportMarkdown();
@@ -3097,25 +3137,423 @@ function bindEvents() {
   document.addEventListener('gesturestart', (e) => e.preventDefault(), { passive: false });
 }
 
-/* ═══════════ DÉMARRAGE ═══════════ */
+/* ═══════════ SYNCHRONISATION ═══════════
+   Les changements reçus de Firestore (premier chargement, autre appareil,
+   écho de nos propres écritures) mettent à jour la copie en mémoire. Un
+   élément déjà présent est modifié sur place : un formulaire ouvert garde
+   ses références. L'écran n'est redessiné que si quelque chose a vraiment
+   changé. */
 
-async function loadState() {
-  [state.books, state.notes, state.quotes, state.words] = await Promise.all(
-    ['books', 'notes', 'quotes', 'words'].map((s) => db.getAll(s))
-  );
+let appStarted = false;
+
+/* Forme comparable d'un élément : clés triées, sans valeur indéfinie. */
+const canon = (v) => JSON.stringify(v, (k, x) => (x && typeof x === 'object' && !Array.isArray(x)
+  ? Object.fromEntries(Object.keys(x).sort().filter((key) => x[key] !== undefined).map((key) => [key, x[key]]))
+  : x));
+
+function applyRemote(store, changes, { first }) {
+  let list = state[store];
+  let dirty = false;
+  if (first) {
+    // Premier instantané (ou reprise après une panne) : il fait foi.
+    const ids = new Set(changes.map((c) => c.id));
+    const kept = list.filter((x) => ids.has(x.id));
+    if (kept.length !== list.length) { list = state[store] = kept; dirty = true; }
+  }
+  const index = new Map(list.map((x, i) => [x.id, i]));
+  const gone = new Set();
+  for (const c of changes) {
+    const i = index.get(c.id);
+    if (c.type === 'removed') {
+      if (i !== undefined) { gone.add(c.id); dirty = true; }
+      continue;
+    }
+    if (i === undefined) {
+      index.set(c.id, list.length);
+      list.push(c.data);
+      dirty = true;
+      continue;
+    }
+    const cur = list[i];
+    if (canon(cur) === canon(c.data)) continue;
+    for (const k of Object.keys(cur)) if (!(k in c.data)) delete cur[k];
+    Object.assign(cur, c.data);
+    dirty = true;
+  }
+  if (gone.size) state[store] = list.filter((x) => !gone.has(x.id));
+  if (dirty) scheduleSyncRender();
 }
 
-async function init() {
-  await loadState();
+let syncRenderQueued = false;
+function scheduleSyncRender() {
+  if (!appStarted || syncRenderQueued) return;
+  syncRenderQueued = true;
+  requestAnimationFrame(() => {
+    syncRenderQueued = false;
+    refresh(render);
+    // Fiche d'un mot ouverte : un doublon peut arriver d'un autre appareil.
+    if (openedSheet && openedSheet.id === 'sheet-word') updateDupHint();
+  });
+}
+
+function onSyncChange() {
+  if (appStarted && state.route === 'settings') renderSyncLine();
+}
+
+const syncErrorsShown = new Map();
+let pendingSyncError = null;
+
+function syncErrorMessage(code) {
+  if (code === 'permission-denied') return 'Le serveur refuse l’accès à vos données. Reconnectez-vous ou réessayez plus tard.';
+  if (code === 'resource-exhausted') return 'Le serveur est très sollicité aujourd’hui : vos changements partiront un peu plus tard.';
+  return 'Synchronisation momentanément impossible. Vos changements sont gardés sur l’appareil.';
+}
+
+function onSyncError(err) {
+  const code = (err && err.code) || 'unknown';
+  if (code === 'unauthenticated') { endSession(); return; }
+  // Un message par type d'erreur, pas une avalanche.
+  if (Date.now() - (syncErrorsShown.get(code) || 0) < 30000) return;
+  syncErrorsShown.set(code, Date.now());
+  const msg = syncErrorMessage(code);
+  if (appStarted) toast(msg); else pendingSyncError = msg;
+}
+
+/* ═══════════ COMPTE ═══════════
+   Connexion par e-mail et mot de passe : les comptes sont ceux d'À tester.
+   Les champs sont reconnus par le trousseau iCloud et le gestionnaire de
+   mots de passe d'Android. */
+
+const login = { mode: 'signin', busy: false };
+
+function showSplash() { $('#splash').classList.remove('gone'); }
+function hideSplash() { $('#splash').classList.add('gone'); }
+
+function showLogin() {
+  const root = document.documentElement;
+  root.classList.remove('booting');
+  root.classList.add('signed-out');
+  $('#login').hidden = false;
+  hideSplash();
+  setLoginBusy(false);
+  // Données de l'ancienne version sur cet appareil : on rassure avant la connexion.
+  legacySummary().then((sum) => {
+    if (!sum) return;
+    const el = $('#login-legacy');
+    el.textContent = `Vos données actuelles (${describeCounts(sum)}) restent sur cet appareil : vous pourrez les importer dans votre compte juste après la connexion.`;
+    el.hidden = false;
+  }).catch(() => {});
+}
+
+function sayLogin(text, tone = 'error') {
+  const el = $('#login-msg');
+  el.textContent = text;
+  el.classList.toggle('ok', tone === 'ok');
+}
+
+function setLoginBusy(on, label = '') {
+  login.busy = on;
+  const btn = $('#login-submit');
+  btn.disabled = on;
+  btn.textContent = on ? label : (login.mode === 'signup' ? 'Créer mon compte' : 'Se connecter');
+}
+
+function setLoginMode(mode) {
+  login.mode = mode;
+  const signup = mode === 'signup';
+  $$('#login-mode .seg-btn').forEach((b) => {
+    const on = b.dataset.mode === mode;
+    b.classList.toggle('active', on);
+    b.setAttribute('aria-pressed', String(on));
+  });
+  $('#form-login').password.autocomplete = signup ? 'new-password' : 'current-password';
+  $('#pw-hint').hidden = !signup;
+  $('#login-forgot').hidden = signup;
+  setLoginBusy(false);
+  sayLogin('');
+}
+
+async function submitLogin(e) {
+  e.preventDefault();
+  if (login.busy) return;
+  const form = $('#form-login');
+  const email = form.email.value.trim();
+  const password = form.password.value;
+  if (!email) { sayLogin('Indiquez votre adresse e-mail.'); form.email.focus(); return; }
+  if (!password) { sayLogin('Indiquez votre mot de passe.'); form.password.focus(); return; }
+  if (login.mode === 'signup' && password.length < MIN_PASSWORD) {
+    sayLogin(`Choisissez un mot de passe d’au moins ${MIN_PASSWORD} caractères.`);
+    form.password.focus();
+    return;
+  }
+  if (!navigator.onLine) { sayLogin('Pas de connexion : la connexion à votre compte demande le réseau.'); return; }
+  sayLogin('');
+  setLoginBusy(true, login.mode === 'signup' ? 'Création du compte…' : 'Connexion…');
+  try {
+    if (login.mode === 'signup') await signUp(email, password);
+    else await signIn(email, password);
+    // La suite (chargement des données) part de watchAuth.
+  } catch (err) {
+    setLoginBusy(false);
+    sayLogin(authMessage(err));
+  }
+}
+
+async function forgotPassword() {
+  if (login.busy) return;
+  const input = $('#form-login').email;
+  const email = input.value.trim();
+  if (!email) {
+    sayLogin('Indiquez votre adresse e-mail ci-dessus, puis touchez « Mot de passe oublié ? ».');
+    input.focus();
+    return;
+  }
+  if (!navigator.onLine) { sayLogin('Pas de connexion : réessayez quand le réseau sera revenu.'); return; }
+  login.busy = true;
+  try {
+    await resetPassword(email);
+    sayLogin(`Si un compte existe pour ${email}, un e-mail pour choisir un nouveau mot de passe vient de partir. Pensez à regarder dans les indésirables.`, 'ok');
+  } catch (err) {
+    sayLogin(authMessage(err));
+  } finally {
+    login.busy = false;
+  }
+}
+
+function bindLogin() {
+  const form = $('#form-login');
+  form.addEventListener('submit', submitLogin);
+  $('#login-mode').addEventListener('click', (e) => {
+    const b = e.target.closest('[data-mode]');
+    if (b && b.dataset.mode !== login.mode) setLoginMode(b.dataset.mode);
+  });
+  $('#login-forgot').addEventListener('click', forgotPassword);
+  $('#pw-toggle').addEventListener('click', () => {
+    const show = form.password.type === 'password';
+    form.password.type = show ? 'text' : 'password';
+    $('#pw-toggle').textContent = show ? 'Masquer' : 'Afficher';
+    $('#pw-toggle').setAttribute('aria-label', show ? 'Masquer le mot de passe' : 'Afficher le mot de passe');
+  });
+  form.email.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); form.password.focus(); }
+  });
+}
+
+/* Déconnexion (réglages, session expirée ou fermée dans un autre onglet) :
+   ce que l'appareil garde du compte est effacé (cache Firestore de Lecture,
+   brouillons), puis l'app repart de l'écran de connexion. Le modèle de
+   reconnaissance de texte, qui n'a rien de personnel, reste. */
+let ending = null;
+function endSession() {
+  if (!ending) {
+    ending = (async () => {
+      appStarted = false;
+      await db.wipeLocalCache();
+      await signOutUser().catch(() => {});
+      try {
+        for (const k of Object.keys(localStorage)) if (k.startsWith(DRAFT_PREFIX)) localStorage.removeItem(k);
+      } catch { /* stockage indisponible */ }
+      location.reload();
+    })();
+  }
+  return ending;
+}
+
+async function logout() {
+  const btn = $('#btn-logout');
+  if (btn.disabled) return;
+  btn.disabled = true;
+  const sent = await db.flushed(2500);
+  const question = sent
+    ? 'Se déconnecter ?\n\nVos données restent dans votre compte : elles sont effacées de cet appareil jusqu’à votre prochaine connexion.'
+    : 'Certains changements n’ont pas encore été envoyés (pas de connexion). Si vous vous déconnectez maintenant, ils seront perdus.\n\nSe déconnecter quand même ?';
+  if (!confirm(question)) { btn.disabled = false; return; }
+  btn.textContent = 'Déconnexion…';
+  await endSession();
+}
+
+/* ═══════════ ANCIENNE VERSION ET IMPORT ═══════════
+   Les données des versions précédentes restent dans le stockage local de
+   l'appareil tant qu'on ne le vide pas. « Importer mes données locales » les
+   envoie dans le compte sans doublon, vérifie sur le serveur que tout y est,
+   puis propose de vider l'ancien stockage. Un fichier de sauvegarde JSON
+   passe par le même chemin. */
+
+const IMPORTED_KEY = 'lecture:ancien-importe';
+let legacy = null;              // nombre d'éléments par type, ou null
+let legacyCardLater = false;    // « Plus tard » : carte retirée jusqu'au prochain lancement
+let importing = false;
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/* Date de l'import de l'ancien stockage dans ce compte, s'il a été fait. */
+function legacyImportedAt() {
+  const user = currentUser();
+  try {
+    const v = JSON.parse(localStorage.getItem(IMPORTED_KEY) || 'null');
+    return v && user && v.uid === user.uid ? v.at : null;
+  } catch {
+    return null;
+  }
+}
+
+async function refreshLegacy() {
+  legacy = await legacySummary().catch(() => null);
+  renderImportCard();
+  if (state.route === 'settings') renderSettings();
+}
+
+function renderImportCard() {
+  const show = Boolean(legacy) && !legacyImportedAt() && !legacyCardLater;
+  $('#import-card').hidden = !show;
+  if (show) {
+    $('#import-card-text').textContent = `Sur cet appareil : ${describeCounts(legacy)}. Importez ces données dans votre compte pour les retrouver sur tous vos appareils.`;
+  }
+}
+
+function setImportBusy(on) {
+  importing = on;
+  for (const id of ['#import-card-go', '#btn-import-local']) {
+    $(id).disabled = on;
+    $(id).textContent = on ? 'Import en cours…' : 'Importer mes données locales';
+  }
+  $('#btn-import-json').disabled = on;
+}
+
+/* Fusionne des données dans le compte, attend que le serveur ait tout reçu,
+   puis vérifie en relisant le compte sur le serveur. Renvoie le bilan, ou
+   null si l'import n'a pas abouti (le message est déjà affiché). */
+async function importIntoAccount(data) {
+  if (importing) return null;
+  if (!navigator.onLine) {
+    alert('L’import demande une connexion : réessayez une fois en ligne. Rien n’a été modifié.');
+    return null;
+  }
+  setImportBusy(true);
+  try {
+    // Le compte doit avoir été lu sur le serveur, pour comparer avec ses versions à jour.
+    for (let i = 0; i < 60 && !db.syncState().server; i++) await sleep(250);
+    if (!db.syncState().server) {
+      alert('Le serveur ne répond pas pour le moment : réessayez dans un instant. Rien n’a été modifié.');
+      return null;
+    }
+    const plan = await planImport(data, state);
+    const sum = (k) => db.STORES.reduce((n, s) => n + plan.counts[s][k], 0);
+    const totals = Object.fromEntries(db.STORES.map((s) => [s, plan.counts[s].total]));
+    if (!sum('total')) { toast('Rien à importer'); return null; }
+    toast('Import en cours…');
+    if (await sendImport(plan) !== 'sent') {
+      alert('L’envoi prend plus de temps que prévu : il continue en arrière-plan. Relancez l’import un peu plus tard pour le vérifier (il n’ajoutera aucun doublon).');
+      return null;
+    }
+    const check = await verifyImport(plan);
+    if (!check.ok) {
+      alert(`Import incomplet : ${check.missing} élément${check.missing > 1 ? 's manquent' : ' manque'} dans votre compte. Relancez l’import : il n’ajoutera aucun doublon.`);
+      return null;
+    }
+    hideToast();
+    return { totals, added: sum('added'), updated: sum('updated'), same: sum('same') };
+  } catch (err) {
+    console.error(err);
+    alert('L’import n’a pas abouti' + (navigator.onLine ? '' : ' (connexion perdue)') + '. Rien n’a été supprimé : vous pouvez le relancer sans risque de doublon.');
+    return null;
+  } finally {
+    setImportBusy(false);
+  }
+}
+
+async function importLocal() {
+  if (importing) return;
+  const data = await readLegacy();
+  if (!data) { await refreshLegacy(); toast('L’ancien stockage est vide'); return; }
+  const res = await importIntoAccount(data);
+  if (!res) return;
+  try {
+    localStorage.setItem(IMPORTED_KEY, JSON.stringify({ uid: currentUser().uid, at: new Date().toISOString() }));
+  } catch { /* stockage indisponible */ }
+  renderImportCard();
+  if (state.route === 'settings') renderSettings();
+  if (confirm(`Import vérifié : tout est dans votre compte (${describeCounts(res.totals)}).\n\nVider l’ancien stockage de cet appareil ? Vos données restent dans votre compte.`)) {
+    await clearLegacy();
+  } else {
+    toast('Import vérifié. L’ancien stockage pourra être vidé depuis les réglages.');
+  }
+}
+
+async function clearLegacy() {
+  const ok = await deleteLegacy();
+  toast(ok ? 'Ancien stockage vidé' : 'Impossible de le vider maintenant : fermez les autres fenêtres de Lecture et réessayez.');
+  await refreshLegacy();
+}
+
+/* ═══════════ RÉGLAGES ═══════════ */
+
+function renderSettings() {
+  const user = currentUser();
+  $('#account-email').textContent = user ? user.email : '';
+  renderSyncLine();
+  $('#legacy-section').hidden = !legacy;
+  if (legacy) {
+    const at = legacyImportedAt();
+    $('#legacy-summary').textContent = `Sur cet appareil : ${describeCounts(legacy)}.`
+      + (at ? ` Ces données ont été importées dans votre compte le ${fmtDate(at)}.` : ' Ces données ne sont pas encore dans votre compte.');
+    $('#btn-clear-local').hidden = !at;
+  }
+  $('#version-line').textContent = 'Lecture — version ' + APP_VERSION;
+}
+
+function renderSyncLine() {
+  const s = db.syncState();
+  const offline = !navigator.onLine;
+  let text;
+  if (offline) {
+    text = s.pending
+      ? 'Hors connexion : vos derniers changements partiront au retour du réseau.'
+      : 'Hors connexion : vos données restent disponibles sur cet appareil.';
+  } else if (s.pending) {
+    text = 'Envoi de vos changements…';
+  } else {
+    text = s.server ? 'À jour avec votre compte.' : 'Connexion au serveur…';
+  }
+  const el = $('#sync-line');
+  el.textContent = text;
+  el.classList.toggle('warn', offline || s.pending);
+}
+
+/* ═══════════ DÉMARRAGE ═══════════
+   La session Firebase d'abord (gardée d'une ouverture à l'autre, même hors
+   ligne) : écran de connexion, ou chargement des données du compte puis
+   affichage de l'app. */
+
+let sessionStarted = false;
+
+function fatal(err) {
+  console.error(err);
+  const splash = $('#splash');
+  splash.classList.remove('gone');
+  splash.classList.add('failed');
+  splash.innerHTML = `<div class="splash-msg"><h2>Démarrage impossible</h2>
+    <p>${esc(String((err && err.message) || err))}</p>
+    <button type="button" class="primary-btn" onclick="location.reload()">Réessayer</button></div>`;
+}
+
+async function startApp(user) {
+  // Données du compte : cache local d'abord, serveur ensuite.
+  await db.start(user.uid, { onChange: applyRemote, onSync: onSyncChange, onError: onSyncError });
   try {
     const sort = localStorage.getItem(WORDS_SORT_KEY);
     if (['recent', 'old', 'az', 'za', 'book'].includes(sort)) state.wordsSort = sort;
   } catch { /* stockage bloqué */ }
   bindEvents();
-  router();
   $('#version-line').textContent = 'Lecture — version ' + APP_VERSION;
+  appStarted = true;
+  document.documentElement.classList.remove('booting', 'signed-out');
+  $('#login').hidden = true;
+  router();
+  hideSplash();
+  if (pendingSyncError) { toast(pendingSyncError); pendingSyncError = null; }
 
-  // Demande au navigateur de ne pas purger le stockage local.
+  // Demande au navigateur de ne pas purger le stockage local (cache hors ligne).
   if (navigator.storage && navigator.storage.persist) {
     navigator.storage.persist().catch(() => {});
   }
@@ -3125,30 +3563,54 @@ async function init() {
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'visible') fillMissingDefinitions();
   });
+  for (const ev of ['online', 'offline']) window.addEventListener(ev, onSyncChange);
 
-  if ('serviceWorker' in navigator) {
-    // updateViaCache:'none' : sw.js toujours revérifié sur le réseau.
-    navigator.serviceWorker.register('./sw.js', { updateViaCache: 'none' })
-      .then((reg) => {
-        reg.update().catch(() => {});
-        // Revérifie à chaque retour au premier plan (lancement d'app iOS).
-        document.addEventListener('visibilitychange', () => {
-          if (document.visibilityState === 'visible') reg.update().catch(() => {});
-        });
-      })
-      .catch(() => {});
-    // Nouvelle version aux commandes : rechargement, mais pas pendant une
-    // saisie (sauf à la toute première installation, où rien ne change).
-    let hadController = Boolean(navigator.serviceWorker.controller);
-    navigator.serviceWorker.addEventListener('controllerchange', () => {
-      if (!hadController) { hadController = true; return; }
-      updatePending = true;
-      applyPendingUpdate();
-    });
-    document.addEventListener('visibilitychange', () => {
-      if (document.visibilityState === 'hidden') applyPendingUpdate();
-    });
-  }
+  refreshLegacy();
 }
 
-init();
+function registerSW() {
+  if (!('serviceWorker' in navigator)) return;
+  // updateViaCache:'none' : sw.js toujours revérifié sur le réseau.
+  navigator.serviceWorker.register('./sw.js', { updateViaCache: 'none' })
+    .then((reg) => {
+      reg.update().catch(() => {});
+      // Revérifie à chaque retour au premier plan (lancement d'app iOS).
+      document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'visible') reg.update().catch(() => {});
+      });
+    })
+    .catch(() => {});
+  // Nouvelle version aux commandes : rechargement, mais pas pendant une
+  // saisie (sauf à la toute première installation, où rien ne change).
+  let hadController = Boolean(navigator.serviceWorker.controller);
+  navigator.serviceWorker.addEventListener('controllerchange', () => {
+    if (!hadController) { hadController = true; return; }
+    updatePending = true;
+    applyPendingUpdate();
+  });
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden') applyPendingUpdate();
+  });
+}
+
+async function boot() {
+  bindLogin();
+  registerSW();
+  // Effacement du cache laissé en suspens par une déconnexion (autre onglet ouvert).
+  await db.pendingWipe().catch(() => {});
+  watchAuth((user) => {
+    if (user) {
+      if (sessionStarted) return;
+      sessionStarted = true;
+      $('#login').hidden = true;
+      showSplash();
+      startApp(user).catch(fatal);
+    } else if (sessionStarted) {
+      endSession(); // session fermée ailleurs ou expirée
+    } else {
+      showLogin();
+    }
+  });
+}
+
+boot();
