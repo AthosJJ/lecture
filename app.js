@@ -5,7 +5,7 @@ import { parseBackup, planImport, sendImport, verifyImport, describeCounts } fro
 import { setBooksKey, booksSearchReady, searchBooks, photoThumbnail, googleBooksPage, validCover } from './covers.js';
 
 /* Synchroniser avec VERSION dans sw.js à chaque mise à jour. */
-const APP_VERSION = '15';
+const APP_VERSION = '16';
 
 /* ——— État en mémoire : copie des données du compte, tenue à jour par la
    synchronisation Firestore (db.js) ——— */
@@ -137,6 +137,19 @@ function hideToast() {
   clearTimeout(toastTimer);
   $('#toast').classList.remove('show');
   toastAction = null;
+}
+
+/* Champ à remplir : il est signalé (contour rouge, petite secousse) sans y
+   placer le curseur. Le clavier ne s'ouvre jamais tout seul : seulement
+   quand on touche un champ. */
+function flagField(el) {
+  if (!el) return;
+  el.classList.remove('needs-input');
+  void el.offsetWidth; // rejoue l'animation
+  el.classList.add('needs-input');
+  el.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+  clearTimeout(el.flagTimer);
+  el.flagTimer = setTimeout(() => el.classList.remove('needs-input'), 1800);
 }
 
 /* ——— Routage par hash (le geste retour iOS fonctionne) ——— */
@@ -488,7 +501,7 @@ function bindProgressSetup(book) {
     e.preventDefault();
     const input = $('#pg-total');
     const total = parseInt(input.value, 10);
-    if (!(total > 0)) { input.focus(); return; }
+    if (!(total > 0)) { flagField(input); return; }
     input.blur();
     book.totalPages = total;
     book.currentPage = Math.min(book.currentPage || 0, total);
@@ -742,6 +755,7 @@ function openBookForm(book = null) {
     : null;
   hideBookSuggest();
   renderCoverField();
+  warmBooksSearch();
   $('#btn-delete-book').hidden = !book;
 
   // Formulaire court par défaut ; détails dépliés s'ils sont déjà remplis.
@@ -755,7 +769,6 @@ function openBookForm(book = null) {
   syncRatingUI();
   syncTypeUI();
   openSheet('#sheet-book');
-  if (!book) form.title.focus({ preventScroll: true });
 }
 
 /* Adapte le formulaire au type : champ Émission et unités pour un podcast. */
@@ -779,7 +792,7 @@ async function saveBookForm(e) {
   e.preventDefault();
   const form = $('#form-book');
   const title = form.title.value.trim();
-  if (!title) { form.title.focus(); toast('Le titre est obligatoire'); return; }
+  if (!title) { flagField(form.title); toast('Le titre est obligatoire'); return; }
 
   const now = new Date().toISOString();
   const existing = state.editing.bookId ? bookById(state.editing.bookId) : null;
@@ -822,7 +835,21 @@ async function saveBookForm(e) {
    Suggestions de Google Books pendant la frappe du titre (livres seulement,
    en ligne, si la clé est dans config/googlebooks), ou photo de la
    couverture. La vignette du formulaire montre le rendu dans la liste. */
-const bs = { timer: null, run: 0, items: [], error: '' };
+const bs = { timer: null, run: 0, items: [], error: '', ctrl: null, cache: new Map(), warmed: false };
+
+/* Connexions à Google Books ouvertes dès l'ouverture du formulaire : la
+   première recherche n'attend pas la poignée de main réseau. */
+function warmBooksSearch() {
+  if (bs.warmed || !booksSearchReady()) return;
+  bs.warmed = true;
+  for (const [href, cors] of [['https://www.googleapis.com', true], ['https://books.google.com', false]]) {
+    const link = document.createElement('link');
+    link.rel = 'preconnect';
+    link.href = href;
+    if (cors) link.crossOrigin = 'anonymous';
+    document.head.appendChild(link);
+  }
+}
 
 function renderCoverField() {
   const form = $('#form-book');
@@ -843,6 +870,7 @@ function renderCoverField() {
 
 function hideBookSuggest() {
   clearTimeout(bs.timer);
+  if (bs.ctrl) { bs.ctrl.abort(); bs.ctrl = null; }
   bs.run++;
   bs.items = [];
   bs.error = '';
@@ -875,15 +903,29 @@ function scheduleBookSuggest() {
     hideBookSuggest();
     return;
   }
+  const key = term.toLowerCase();
+  if (bs.cache.has(key)) {
+    // Déjà cherché (retour arrière) : réponse immédiate.
+    bs.run++;
+    bs.items = bs.cache.get(key);
+    bs.error = '';
+    renderBookSuggest();
+    return;
+  }
   bs.timer = setTimeout(async () => {
     const run = ++bs.run;
+    if (bs.ctrl) bs.ctrl.abort();
+    const ctrl = new AbortController();
+    bs.ctrl = ctrl;
     try {
-      const items = await searchBooks(term);
+      const items = await searchBooks(term, ctrl.signal);
       if (run !== bs.run) return;
+      bs.cache.set(key, items);
+      if (bs.cache.size > 40) bs.cache.delete(bs.cache.keys().next().value);
       bs.items = items;
       bs.error = '';
     } catch (err) {
-      if (run !== bs.run) return;
+      if (run !== bs.run || err.name === 'AbortError') return;
       bs.items = [];
       // Clé refusée ou quota atteint : on le dit (utile au réglage de la clé).
       bs.error = err.status === 400 || err.status === 403
@@ -891,7 +933,7 @@ function scheduleBookSuggest() {
         : '';
     }
     renderBookSuggest();
-  }, 400);
+  }, 250);
 }
 
 function pickBookSuggestion(i) {
@@ -1039,14 +1081,13 @@ function openNoteForm(note = null, bookId = null) {
   restoreDraft('note');
   $('#btn-delete-note').hidden = !note;
   openSheet('#sheet-note');
-  if (!note) form.text.focus({ preventScroll: true });
 }
 
 async function saveNoteForm(e) {
   e.preventDefault();
   const form = $('#form-note');
   const text = form.text.value.trim();
-  if (!text) { form.text.focus(); toast('La note est vide'); return; }
+  if (!text) { flagField(form.text); toast('La note est vide'); return; }
   const book = bookById(state.editing.noteBookId);
   if (!book) { closeSheet(); return; }
   const now = new Date().toISOString();
@@ -1111,7 +1152,7 @@ async function saveQuoteForm(e) {
   e.preventDefault();
   const form = $('#form-quote');
   const text = form.text.value.trim();
-  if (!text) { form.text.focus(); toast('Écrivez, dictez ou scannez la citation'); return; }
+  if (!text) { flagField(form.text); toast('Écrivez, dictez ou scannez la citation'); return; }
   const book = bookById(state.editing.quoteBookId);
   if (!book) { closeSheet(); return; }
   const now = new Date().toISOString();
@@ -1855,8 +1896,7 @@ function openWordForm(word = null, bookId, opts = {}) {
   syncFromQuoteButton();
   openSheet('#sheet-word');
   if (opts.quote) openQuotePicker(opts.quote);
-  else if (!word) form.text.focus({ preventScroll: true });
-  else if (!word.definition && word.defStatus !== 'none') runWordLookup(word.text);
+  else if (word && !word.definition && word.defStatus !== 'none') runWordLookup(word.text);
 }
 
 function scheduleWordLookup() {
@@ -1926,7 +1966,7 @@ async function saveWordForm(e) {
   e.preventDefault();
   const form = $('#form-word');
   const text = form.text.value.trim().replace(/\s+/g, ' ');
-  if (!text) { form.text.focus(); toast('Écrivez le mot ou l’expression'); return; }
+  if (!text) { flagField(form.text); toast('Écrivez le mot ou l’expression'); return; }
   const now = new Date().toISOString();
   let word = state.editing.wordId ? state.words.find((w) => w.id === state.editing.wordId) : null;
   const isNew = !word;
@@ -3068,12 +3108,12 @@ function bindEvents() {
   $('#quote-to-word').addEventListener('click', () => {
     const f = $('#form-quote');
     const text = f.text.value.trim();
-    if (!text) { f.text.focus(); return; }
+    if (!text) { flagField(f.text); return; }
     openWordFromQuote({ text, bookId: state.editing.quoteBookId, page: f.page.value === '' ? null : parseInt(f.page.value, 10) });
   });
   $('#def-refresh').addEventListener('click', () => {
     const term = wordForm.text.value.trim();
-    if (!term) { wordForm.text.focus(); return; }
+    if (!term) { flagField(wordForm.text); return; }
     runWordLookup(term, true);
   });
   $('#def-status').addEventListener('click', (e) => {
@@ -3424,11 +3464,11 @@ async function submitLogin(e) {
   const form = $('#form-login');
   const email = form.email.value.trim();
   const password = form.password.value;
-  if (!email) { sayLogin('Indiquez votre adresse e-mail.'); form.email.focus(); return; }
-  if (!password) { sayLogin('Indiquez votre mot de passe.'); form.password.focus(); return; }
+  if (!email) { sayLogin('Indiquez votre adresse e-mail.'); flagField(form.email); return; }
+  if (!password) { sayLogin('Indiquez votre mot de passe.'); flagField(form.password); return; }
   if (login.mode === 'signup' && password.length < MIN_PASSWORD) {
     sayLogin(`Choisissez un mot de passe d’au moins ${MIN_PASSWORD} caractères.`);
-    form.password.focus();
+    flagField(form.password);
     return;
   }
   if (!navigator.onLine) { sayLogin('Pas de connexion : la connexion à votre compte demande le réseau.'); return; }
@@ -3450,7 +3490,7 @@ async function forgotPassword() {
   const email = input.value.trim();
   if (!email) {
     sayLogin('Indiquez votre adresse e-mail ci-dessus, puis touchez « Mot de passe oublié ? ».');
-    input.focus();
+    flagField(input);
     return;
   }
   if (!navigator.onLine) { sayLogin('Pas de connexion : réessayez quand le réseau sera revenu.'); return; }

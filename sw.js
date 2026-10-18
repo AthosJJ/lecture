@@ -8,7 +8,7 @@
    À tester est servie sur le même domaine : on ne touche qu'aux caches
    « lecture-* ».
    Publier une version = incrémenter VERSION (et APP_VERSION dans app.js). */
-const VERSION = 'lecture-v15';
+const VERSION = 'lecture-v16';
 const ASSETS = [
   './',
   './index.html',
