@@ -148,33 +148,20 @@
       <div id="words-list"></div>
     </section>
 
-    <!-- ÉCRAN : Statistiques -->
-    <section class="view" id="view-stats" aria-label="Statistiques">
+    <!-- ÉCRAN : Compte (statistiques, réglages, données) -->
+    <section class="view" id="view-account" aria-label="Compte">
       <header class="page-head">
-        <h1>Statistiques</h1>
-        <button class="icon-btn" id="btn-settings" aria-label="Réglages">
-          <svg viewBox="0 0 24 24" width="21" height="21" aria-hidden="true" fill="none" stroke="currentColor"><circle cx="12" cy="12" r="5.6" stroke-width="2"/><circle cx="12" cy="12" r="2" stroke-width="1.8"/><path d="M12 2.6v3M12 18.4v3M2.6 12h3M18.4 12h3M5.35 5.35l2.1 2.1M16.55 16.55l2.1 2.1M5.35 18.65l2.1-2.1M16.55 7.45l2.1-2.1" stroke-width="3"/></svg>
-        </button>
+        <h1>Compte</h1>
       </header>
-      <div id="stats-content"></div>
-    </section>
-
-    <!-- ÉCRAN : Réglages (compte, données, mentions) -->
-    <section class="view view-push" id="view-settings" aria-label="Réglages">
-      <header class="page-head detail-head">
-        <button class="back-btn" id="btn-settings-back" aria-label="Retour aux statistiques">
-          <svg viewBox="0 0 20 20" width="18" height="18" aria-hidden="true"><path d="M12.5 4 6.5 10l6 6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" fill="none"/></svg>
-          <span>Stats</span>
-        </button>
-      </header>
-      <h1 class="settings-title">Réglages</h1>
-
-      <h2 class="section-title">Compte</h2>
       <div class="card settings-card">
         <p class="account-email" id="account-email"></p>
         <p class="sync-line" id="sync-line"></p>
       </div>
-      <button class="row-btn danger" id="btn-logout">Se déconnecter</button>
+      <button class="row-btn install" id="btn-install" hidden>Installer l’application sur cet appareil</button>
+      <p class="hint" id="install-hint" hidden></p>
+
+      <h2 class="section-title">Statistiques</h2>
+      <div id="stats-content"></div>
 
       <div id="legacy-section" hidden>
         <h2 class="section-title">Ancienne version</h2>
@@ -194,6 +181,7 @@
       <h2 class="section-title">Mentions</h2>
       <div class="card credits">
         <p><b>Définitions</b> : <a href="https://fr.wiktionary.org/" target="_blank" rel="noopener">Wiktionnaire</a>, par ses contributeurs, sous licence <a href="https://creativecommons.org/licenses/by-sa/4.0/deed.fr" target="_blank" rel="noopener">CC BY-SA 4.0</a> ; extraits mis en forme par l’app. Dans la fiche d’un mot, « Wiktionnaire » ouvre la page d’origine.</p>
+        <p><b>Couvertures et fiches de livres</b> : <a href="https://books.google.com/" target="_blank" rel="noopener">Google Books</a>. Sur la fiche d’un livre, « Google Books » sous la couverture ouvre sa page.</p>
         <p><b>CNRTL</b> : liens vers <a href="https://www.cnrtl.fr/" target="_blank" rel="noopener">cnrtl.fr</a>. Une définition collée depuis le CNRTL appartient à ses auteurs (ATILF, CNRS et Université de Lorraine) et reste pour votre usage personnel.</p>
         <p><b>Reconnaissance de texte</b> : <a href="https://github.com/naptha/tesseract.js" target="_blank" rel="noopener">Tesseract.js</a> et Tesseract OCR, modèle français tessdata_best, sous licence Apache 2.0, sur l’appareil.</p>
         <p><b>Comptes et données</b> : <a href="https://firebase.google.com/" target="_blank" rel="noopener">Firebase</a> (Google), SDK sous licence Apache 2.0.</p>
@@ -202,6 +190,11 @@
       <h2 class="section-title">Application</h2>
       <button class="row-btn" id="btn-update-app">Rechercher une mise à jour</button>
       <p class="hint" id="version-line"></p>
+
+      <h2 class="section-title">Session et données</h2>
+      <button class="row-btn danger" id="btn-logout">Se déconnecter</button>
+      <button class="row-btn danger" id="btn-delete-all">Supprimer toutes mes données</button>
+      <p class="hint">Supprime vos livres, citations, notes et mots de votre compte, sur tous vos appareils. Le compte lui-même reste, avec vos données À tester.</p>
     </section>
 
     <!-- ÉCRAN : Fiche d'un livre -->
@@ -253,9 +246,9 @@
         <svg viewBox="0 0 24 24" width="24" height="24" aria-hidden="true"><text x="12" y="17.5" text-anchor="middle" font-size="14" font-weight="700" font-family="Georgia, 'Times New Roman', serif" fill="currentColor">Aa</text></svg>
         <span>Mots</span>
       </a>
-      <a href="#/stats" class="tab" data-route="stats">
-        <svg viewBox="0 0 24 24" width="24" height="24" aria-hidden="true"><path d="M5 19V12M12 19V5m7 14v-9" stroke="currentColor" stroke-width="2" stroke-linecap="round" fill="none"/></svg>
-        <span>Stats</span>
+      <a href="#/account" class="tab" data-route="account">
+        <svg viewBox="0 0 24 24" width="24" height="24" aria-hidden="true"><circle cx="12" cy="8.4" r="3.7" stroke="currentColor" stroke-width="1.7" fill="none"/><path d="M4.8 19.6c.9-3.5 3.8-5.5 7.2-5.5s6.3 2 7.2 5.5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" fill="none"/></svg>
+        <span>Compte</span>
       </a>
     </nav>
 
@@ -285,10 +278,24 @@
           <span id="label-title">Titre *</span>
           <input name="title" type="text" required autocomplete="off" enterkeyhint="done">
         </label>
+        <!-- Livres proposés par Google Books pendant la frappe -->
+        <div class="book-suggest" id="book-suggest" role="listbox" aria-label="Livres proposés" hidden></div>
         <label class="field">
           <span>Auteur</span>
           <input name="author" type="text" autocomplete="off" enterkeyhint="done">
         </label>
+        <div class="field cover-field">
+          <span>Couverture</span>
+          <div class="cover-row">
+            <div id="cover-preview"></div>
+            <div class="cover-actions">
+              <button type="button" class="link-btn" id="cover-photo">Prendre en photo</button>
+              <button type="button" class="link-btn muted" id="cover-remove" hidden>Retirer</button>
+              <small class="cover-hint" id="cover-hint"></small>
+            </div>
+          </div>
+          <input type="file" id="cover-file" accept="image/*" hidden>
+        </div>
         <div class="field">
           <span>Statut</span>
           <div class="segmented small-seg" id="field-status">

@@ -2,9 +2,10 @@ import * as db from './db.js';
 import { watchAuth, currentUser, signIn, signUp, resetPassword, signOutUser, authMessage, MIN_PASSWORD } from './account.js';
 import { legacySummary, readLegacy, deleteLegacy } from './legacy.js';
 import { parseBackup, planImport, sendImport, verifyImport, describeCounts } from './importer.js';
+import { setBooksKey, booksSearchReady, searchBooks, photoThumbnail, googleBooksPage, validCover } from './covers.js';
 
 /* Synchroniser avec VERSION dans sw.js à chaque mise à jour. */
-const APP_VERSION = '14';
+const APP_VERSION = '15';
 
 /* ——— État en mémoire : copie des données du compte, tenue à jour par la
    synchronisation Firestore (db.js) ——— */
@@ -25,7 +26,7 @@ const state = {
   wordsBook: '',
   wordsSort: 'recent',
   editing: { bookId: null, noteId: null, noteBookId: null, quoteId: null, quoteBookId: null, wordId: null },
-  form: { type: 'book', status: 'toread', rating: 0 }
+  form: { type: 'book', status: 'toread', rating: 0, cover: null }
 };
 
 const STATUS_LABELS = { toread: 'À lire', reading: 'En cours', done: 'Terminé' };
@@ -153,10 +154,8 @@ function router() {
     state.route = 'quotes';
   } else if (hash === '#/words') {
     state.route = 'words';
-  } else if (hash === '#/stats') {
-    state.route = 'stats';
-  } else if (hash === '#/settings') {
-    state.route = 'settings';
+  } else if (hash === '#/account' || hash === '#/stats' || hash === '#/settings') {
+    state.route = 'account';
   } else {
     state.route = 'library';
   }
@@ -173,15 +172,13 @@ function render() {
 
   $$('.view').forEach((v) => v.classList.remove('active'));
   $('#tabbar').classList.toggle('hidden', r === 'book');
-  // Les réglages s'ouvrent depuis les statistiques : l'onglet Stats reste allumé.
-  $$('.tab').forEach((t) => t.classList.toggle('active', t.dataset.route === (r === 'settings' ? 'stats' : r)));
+  $$('.tab').forEach((t) => t.classList.toggle('active', t.dataset.route === r));
   $('#book-actions').hidden = r !== 'book';
 
   if (r === 'library') { $('#view-library').classList.add('active'); renderLibrary(); }
   if (r === 'quotes') { $('#view-quotes').classList.add('active'); renderQuotesView(); }
   if (r === 'words') { $('#view-words').classList.add('active'); renderWordsView(); }
-  if (r === 'stats') { $('#view-stats').classList.add('active'); renderStats(); }
-  if (r === 'settings') { $('#view-settings').classList.add('active'); renderSettings(); }
+  if (r === 'account') { $('#view-account').classList.add('active'); renderStats(); renderSettings(); }
   if (r === 'book') { $('#view-book').classList.add('active'); renderBook(); }
 
   if (!sameScreen) window.scrollTo(0, 0);
@@ -196,10 +193,16 @@ function refresh(fn) {
 
 /* ═══════════ ÉCRAN BIBLIOTHÈQUE ═══════════ */
 
-function coverHTML(book) {
+/* Vignette d'un livre : sa couverture (Google Books ou photo) si elle en a
+   une, sinon initiales sur un dégradé. Si l'image ne charge pas (hors ligne,
+   lien mort), les initiales reprennent la place. */
+function coverHTML(book, extra = '') {
   const key = book.type === 'podcast' && book.show ? book.show : book.title;
   const kind = book.type === 'article' ? ' article' : (book.type === 'podcast' ? ' podcast' : '');
-  return `<div class="cover${kind}" style="--h:${hueFromString(key)}"><span>${esc(initials(key))}</span></div>`;
+  const img = validCover(book.cover)
+    ? `<img src="${esc(book.cover)}" alt="" loading="lazy" decoding="async" referrerpolicy="no-referrer">`
+    : '';
+  return `<div class="cover${kind}${img ? ' has-img' : ''}${extra}" style="--h:${hueFromString(key)}"><span>${esc(initials(key))}</span>${img}</div>`;
 }
 
 function bookCard(book, i, matchBadge) {
@@ -398,8 +401,15 @@ function renderBook() {
     </div>`;
   }
 
+  const heroCover = validCover(book.cover) ? `
+      <div class="hero-cover">
+        ${coverHTML(book, ' big')}
+        ${book.coverSource === 'googlebooks' && book.googleBooksId
+    ? `<a class="gb-link" href="${esc(googleBooksPage(book.googleBooksId))}" target="_blank" rel="noopener">Google Books</a>` : ''}
+      </div>` : '';
   $('#book-content').innerHTML = `
-    <div class="book-hero">
+    <div class="book-hero${heroCover ? ' with-cover' : ''}">
+      ${heroCover}
       <p class="kicker">${TYPE_LABELS[book.type] || 'Livre'}${book.createdAt ? ' · ajouté le ' + fmtDate(book.createdAt) : ''}</p>
       <h2>${esc(book.title)}</h2>
       ${sub ? `<p class="author">${esc(sub)}</p>` : ''}
@@ -588,6 +598,7 @@ function closeSheet({ discard = false, keepBackdrop = false } = {}) {
   }
   if (sheet.id === 'sheet-quote') closeOcrPanel();
   if (sheet.id === 'sheet-word') { clearTimeout(wl.timer); wl.run++; hideWordSuggest(); }
+  if (sheet.id === 'sheet-book') hideBookSuggest();
   if (sheet.contains(document.activeElement)) document.activeElement.blur();
 
   sheet.classList.remove('open', 'dragging');
@@ -726,6 +737,11 @@ function openBookForm(book = null) {
   form.startDate.value = book ? (book.startDate || '') : '';
   form.endDate.value = book ? (book.endDate || '') : '';
   form.tags.value = book ? (book.tags || []).join(', ') : '';
+  state.form.cover = book && validCover(book.cover)
+    ? { url: book.cover, source: book.coverSource || '', gbId: book.googleBooksId || '' }
+    : null;
+  hideBookSuggest();
+  renderCoverField();
   $('#btn-delete-book').hidden = !book;
 
   // Formulaire court par défaut ; détails dépliés s'ils sont déjà remplis.
@@ -781,6 +797,10 @@ async function saveBookForm(e) {
   book.endDate = form.endDate.value || null;
   book.tags = parseTags(form.tags.value);
   book.rating = state.form.status === 'done' ? state.form.rating : 0;
+  const cover = state.form.cover;
+  book.cover = cover ? cover.url : null;
+  book.coverSource = cover ? (cover.source || null) : null;
+  book.googleBooksId = cover && cover.source === 'googlebooks' ? (cover.gbId || null) : null;
   book.updatedAt = now;
 
   // Automatismes de statut
@@ -796,6 +816,106 @@ async function saveBookForm(e) {
   closeSheet();
   toast(existing ? 'Modifications enregistrées' : 'Ajouté à la bibliothèque');
   render();
+}
+
+/* ——— Couverture dans le formulaire ———
+   Suggestions de Google Books pendant la frappe du titre (livres seulement,
+   en ligne, si la clé est dans config/googlebooks), ou photo de la
+   couverture. La vignette du formulaire montre le rendu dans la liste. */
+const bs = { timer: null, run: 0, items: [], error: '' };
+
+function renderCoverField() {
+  const form = $('#form-book');
+  const cover = state.form.cover;
+  const preview = {
+    type: state.form.type,
+    title: form.title.value.trim() || '?',
+    show: form.show.value.trim(),
+    cover: cover ? cover.url : null
+  };
+  $('#cover-preview').innerHTML = coverHTML(preview);
+  $('#cover-remove').hidden = !cover;
+  $('#cover-photo').textContent = cover ? 'Autre photo' : 'Prendre en photo';
+  $('#cover-hint').textContent = cover
+    ? (cover.source === 'googlebooks' ? 'Couverture Google Books' : 'Votre photo')
+    : (booksSearchReady() && state.form.type === 'book' ? 'ou choisissez un livre proposé en tapant le titre' : '');
+}
+
+function hideBookSuggest() {
+  clearTimeout(bs.timer);
+  bs.run++;
+  bs.items = [];
+  bs.error = '';
+  const box = $('#book-suggest');
+  box.hidden = true;
+  box.innerHTML = '';
+}
+
+function renderBookSuggest() {
+  const box = $('#book-suggest');
+  if (bs.error) {
+    box.innerHTML = `<p class="gb-attrib">${esc(bs.error)}</p>`;
+    box.hidden = false;
+    return;
+  }
+  if (!bs.items.length) { box.hidden = true; box.innerHTML = ''; return; }
+  box.innerHTML = bs.items.map((b, i) => `
+    <button type="button" class="gb-item" role="option" data-i="${i}">
+      ${b.cover ? `<img src="${esc(b.cover)}" alt="" loading="lazy" referrerpolicy="no-referrer">` : '<span class="gb-noimg" aria-hidden="true"></span>'}
+      <span class="gb-info"><b>${esc(b.title)}</b><small>${esc([b.authors, b.year, b.pages ? b.pages + ' p.' : ''].filter(Boolean).join(' · '))}</small></span>
+    </button>`).join('')
+    + '<p class="gb-attrib">Livres proposés par Google Books</p>';
+  box.hidden = false;
+}
+
+function scheduleBookSuggest() {
+  clearTimeout(bs.timer);
+  const term = $('#form-book').title.value.trim();
+  if (state.form.type !== 'book' || term.length < 3 || !navigator.onLine || !booksSearchReady()) {
+    hideBookSuggest();
+    return;
+  }
+  bs.timer = setTimeout(async () => {
+    const run = ++bs.run;
+    try {
+      const items = await searchBooks(term);
+      if (run !== bs.run) return;
+      bs.items = items;
+      bs.error = '';
+    } catch (err) {
+      if (run !== bs.run) return;
+      bs.items = [];
+      // Clé refusée ou quota atteint : on le dit (utile au réglage de la clé).
+      bs.error = err.status === 400 || err.status === 403
+        ? 'Recherche Google Books indisponible : clé refusée ou quota atteint.'
+        : '';
+    }
+    renderBookSuggest();
+  }, 400);
+}
+
+function pickBookSuggestion(i) {
+  const b = bs.items[i];
+  if (!b) return;
+  const form = $('#form-book');
+  form.title.value = b.title;
+  if (b.authors) form.author.value = b.authors;
+  if (b.pages && !form.totalPages.value) form.totalPages.value = b.pages;
+  if (b.cover) state.form.cover = { url: b.cover, source: 'googlebooks', gbId: b.id };
+  hideBookSuggest();
+  renderCoverField();
+}
+
+async function takeCoverPhoto(file) {
+  $('#cover-hint').textContent = 'Préparation de la photo…';
+  const url = await photoThumbnail(file);
+  if (!url) {
+    toast('Impossible d’utiliser cette photo — essayez-en une autre.');
+    renderCoverField();
+    return;
+  }
+  state.form.cover = { url, source: 'photo', gbId: '' };
+  renderCoverField();
 }
 
 /* Suppression immédiate, rattrapable avec « Annuler » dans le toast. */
@@ -2993,10 +3113,10 @@ function bindEvents() {
   });
   $('#btn-export-book').addEventListener('click', () => exportMarkdown(bookById(state.currentBookId)));
 
-  // Réglages : compte, ancienne version, sauvegarde et exports
-  $('#btn-settings').addEventListener('click', () => navigate('#/settings'));
-  $('#btn-settings-back').addEventListener('click', () => (history.length > 1 ? history.back() : navigate('#/stats')));
+  // Compte : session, ancienne version, sauvegarde et exports, installation
   $('#btn-logout').addEventListener('click', logout);
+  $('#btn-delete-all').addEventListener('click', deleteAllData);
+  $('#btn-install').addEventListener('click', promptInstall);
   $('#btn-import-local').addEventListener('click', importLocal);
   $('#btn-clear-local').addEventListener('click', () => {
     if (confirm('Vider l’ancien stockage de cet appareil ?\n\nVos données sont déjà dans votre compte : seule cette copie locale est supprimée.')) clearLegacy();
@@ -3005,7 +3125,7 @@ function bindEvents() {
   $('#import-card-later').addEventListener('click', () => {
     legacyCardLater = true;
     renderImportCard();
-    toast('L’import reste possible depuis Stats › Réglages');
+    toast('L’import reste possible depuis l’onglet Compte');
   });
   $('#btn-export-md').addEventListener('click', () => {
     if (!state.books.length) { toast('Rien à exporter pour le moment'); return; }
@@ -3041,6 +3161,8 @@ function bindEvents() {
     state.form.type = b.dataset.value;
     setSegmented('field-type', state.form.type);
     syncTypeUI();
+    if (state.form.type !== 'book') hideBookSuggest();
+    renderCoverField();
   });
   $('#field-status').addEventListener('click', (e) => {
     const b = e.target.closest('.seg-btn');
@@ -3057,6 +3179,29 @@ function bindEvents() {
     syncRatingUI();
   });
   $('#book-more-btn').addEventListener('click', () => setBookDetails($('#book-more').hidden));
+  // Couverture : suggestions Google Books pendant la frappe du titre, ou photo
+  const bookForm = $('#form-book');
+  bookForm.title.addEventListener('input', () => { renderCoverField(); scheduleBookSuggest(); });
+  bookForm.show.addEventListener('input', renderCoverField);
+  $('#book-suggest').addEventListener('click', (e) => {
+    const item = e.target.closest('.gb-item');
+    if (item) pickBookSuggestion(Number(item.dataset.i));
+  });
+  $('#cover-photo').addEventListener('click', () => $('#cover-file').click());
+  $('#cover-file').addEventListener('change', (e) => {
+    const file = e.target.files[0];
+    e.target.value = '';
+    if (file) takeCoverPhoto(file);
+  });
+  $('#cover-remove').addEventListener('click', () => { state.form.cover = null; renderCoverField(); });
+  // Couverture qui ne charge pas (hors ligne, lien mort) : les initiales reviennent.
+  document.addEventListener('error', (e) => {
+    const img = e.target;
+    if (!(img instanceof HTMLImageElement)) return;
+    const cover = img.closest('.cover');
+    if (cover) { cover.classList.remove('has-img'); img.remove(); return; }
+    if (img.closest('.gb-item')) img.replaceWith(Object.assign(document.createElement('span'), { className: 'gb-noimg' }));
+  }, true);
   bindTagSuggest($('#form-book').tags, $('#book-tag-suggest'), bookTagPool);
   bindTagSuggest($('#form-quote').tags, $('#quote-tag-suggest'), quoteTagPool);
   $('#form-book').addEventListener('submit', saveBookForm);
@@ -3197,7 +3342,7 @@ function scheduleSyncRender() {
 }
 
 function onSyncChange() {
-  if (appStarted && state.route === 'settings') renderSyncLine();
+  if (appStarted && state.route === 'account') renderSyncLine();
 }
 
 const syncErrorsShown = new Map();
@@ -3386,6 +3531,12 @@ let importing = false;
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+/* Le serveur a-t-il répondu au moins une fois depuis l'ouverture ? (15 s au plus) */
+async function serverReached() {
+  for (let i = 0; i < 60 && !db.syncState().server; i++) await sleep(250);
+  return db.syncState().server;
+}
+
 /* Date de l'import de l'ancien stockage dans ce compte, s'il a été fait. */
 function legacyImportedAt() {
   const user = currentUser();
@@ -3400,7 +3551,7 @@ function legacyImportedAt() {
 async function refreshLegacy() {
   legacy = await legacySummary().catch(() => null);
   renderImportCard();
-  if (state.route === 'settings') renderSettings();
+  if (state.route === 'account') renderSettings();
 }
 
 function renderImportCard() {
@@ -3432,8 +3583,7 @@ async function importIntoAccount(data) {
   setImportBusy(true);
   try {
     // Le compte doit avoir été lu sur le serveur, pour comparer avec ses versions à jour.
-    for (let i = 0; i < 60 && !db.syncState().server; i++) await sleep(250);
-    if (!db.syncState().server) {
+    if (!await serverReached()) {
       alert('Le serveur ne répond pas pour le moment : réessayez dans un instant. Rien n’a été modifié.');
       return null;
     }
@@ -3472,11 +3622,11 @@ async function importLocal() {
     localStorage.setItem(IMPORTED_KEY, JSON.stringify({ uid: currentUser().uid, at: new Date().toISOString() }));
   } catch { /* stockage indisponible */ }
   renderImportCard();
-  if (state.route === 'settings') renderSettings();
+  if (state.route === 'account') renderSettings();
   if (confirm(`Import vérifié : tout est dans votre compte (${describeCounts(res.totals)}).\n\nVider l’ancien stockage de cet appareil ? Vos données restent dans votre compte.`)) {
     await clearLegacy();
   } else {
-    toast('Import vérifié. L’ancien stockage pourra être vidé depuis les réglages.');
+    toast('Import vérifié. L’ancien stockage pourra être vidé depuis l’onglet Compte.');
   }
 }
 
@@ -3486,12 +3636,127 @@ async function clearLegacy() {
   await refreshLegacy();
 }
 
-/* ═══════════ RÉGLAGES ═══════════ */
+/* ═══════════ COMPTE : réglages ═══════════ */
+
+/* « Supprimer toutes mes données » : livres, notes, citations et mots de
+   Lecture, dans le compte, donc sur tous les appareils. Le compte lui-même
+   reste (il sert aussi à À tester), comme l'ancien stockage de l'appareil,
+   qui a son propre bouton. Double confirmation ; en ligne seulement, pour
+   vérifier sur le serveur que tout est parti. */
+let deleting = false;
+
+async function deleteAllData() {
+  if (deleting || importing) return;
+  const counts = Object.fromEntries(db.STORES.map((s) => [s, state[s].length]));
+  if (!Object.values(counts).some(Boolean)) { toast('Votre compte Lecture est déjà vide'); return; }
+  if (!confirm(`Supprimer toutes vos données de Lecture (${describeCounts(counts)}) ?\n\nElles disparaîtront de votre compte, sur tous vos appareils. Votre compte reste, avec vos données À tester.\n\nConseil : faites d’abord « Sauvegarder tout (JSON) ».`)) return;
+  if (!confirm('Dernière vérification : la suppression est définitive.\n\nTout supprimer ?')) return;
+  if (!navigator.onLine) {
+    alert('La suppression demande une connexion : réessayez une fois en ligne. Rien n’a été supprimé.');
+    return;
+  }
+  const btn = $('#btn-delete-all');
+  deleting = true;
+  btn.disabled = true;
+  btn.textContent = 'Suppression en cours…';
+  try {
+    if (!await serverReached()) {
+      alert('Le serveur ne répond pas pour le moment : réessayez dans un instant. Rien n’a été supprimé.');
+      return;
+    }
+    // Ce que l'app a en mémoire, plus ce que le serveur aurait en plus.
+    const ops = [];
+    for (const store of db.STORES) {
+      const ids = new Set(state[store].map((x) => x.id));
+      for (const id of (await db.serverDocs(store)).keys()) ids.add(id);
+      for (const id of ids) ops.push({ type: 'delete', store, id });
+    }
+    let timer;
+    const sent = await Promise.race([
+      db.commit(ops).then(() => true),
+      new Promise((resolve) => { timer = setTimeout(() => resolve(false), 60000); })
+    ]);
+    clearTimeout(timer);
+    let left = 0;
+    if (sent) for (const store of db.STORES) left += (await db.serverDocs(store)).size;
+    if (!sent || left) {
+      alert('La suppression n’est pas allée jusqu’au bout. Relancez-la dans un instant.');
+      return;
+    }
+    try {
+      for (const k of Object.keys(localStorage)) if (k.startsWith(DRAFT_PREFIX)) localStorage.removeItem(k);
+      localStorage.removeItem(IMPORTED_KEY); // l'ancien stockage pourra être réimporté
+    } catch { /* stockage indisponible */ }
+    renderImportCard();
+    toast('Toutes vos données de Lecture ont été supprimées');
+  } catch (err) {
+    console.error(err);
+    alert('La suppression n’a pas abouti' + (navigator.onLine ? '' : ' (connexion perdue)') + '. Relancez-la dans un instant.');
+  } finally {
+    deleting = false;
+    btn.disabled = false;
+    btn.textContent = 'Supprimer toutes mes données';
+  }
+}
+
+/* ——— Installation ———
+   Android (Chrome) : l'app s'installe comme une vraie application, pas comme
+   un simple raccourci qui rouvrirait Chrome. Le manifeste n'a pas d'« id » :
+   son identité est son adresse de départ (/lecture/), distincte d'À tester
+   sur le même domaine (leçon d'À tester 2.0.4). Chrome signale qu'il peut
+   l'installer (beforeinstallprompt) : bouton dans Compte, et une proposition
+   unique après la connexion. Sur iPhone, l'installation passe par Safari. */
+const INSTALL_OFFERED_KEY = 'lecture:installation-proposee';
+let installPrompt = null;
+const isStandalone = () => window.matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
+
+window.addEventListener('beforeinstallprompt', (e) => {
+  e.preventDefault();
+  installPrompt = e;
+  renderInstall();
+  offerInstallOnce();
+});
+window.addEventListener('appinstalled', () => {
+  installPrompt = null;
+  renderInstall();
+});
+
+async function promptInstall() {
+  if (!installPrompt) return;
+  const ev = installPrompt;
+  installPrompt = null;
+  ev.prompt();
+  try { await ev.userChoice; } catch { /* rien */ }
+  renderInstall();
+}
+
+function offerInstallOnce() {
+  if (!appStarted || !installPrompt) return;
+  try {
+    if (localStorage.getItem(INSTALL_OFFERED_KEY)) return;
+    localStorage.setItem(INSTALL_OFFERED_KEY, '1');
+  } catch { return; }
+  setTimeout(() => {
+    if (installPrompt && !openedSheet) toast('Installer Lecture comme une application ?', { label: 'Installer', run: promptInstall });
+  }, 1500);
+}
+
+function renderInstall() {
+  const btn = $('#btn-install');
+  const hint = $('#install-hint');
+  if (!btn) return;
+  btn.hidden = !installPrompt;
+  // iPhone dans Safari : pas d'invite possible, on explique.
+  const iosTip = IS_IOS && !isStandalone();
+  hint.hidden = !iosTip;
+  if (iosTip) hint.textContent = 'Pour installer l’app : dans Safari, Partager › Sur l’écran d’accueil.';
+}
 
 function renderSettings() {
   const user = currentUser();
   $('#account-email').textContent = user ? user.email : '';
   renderSyncLine();
+  renderInstall();
   $('#legacy-section').hidden = !legacy;
   if (legacy) {
     const at = legacyImportedAt();
@@ -3566,6 +3831,9 @@ async function startApp(user) {
   for (const ev of ['online', 'offline']) window.addEventListener(ev, onSyncChange);
 
   refreshLegacy();
+  offerInstallOnce();
+  // Clé Google Books (couvertures) : config/googlebooks, saisie dans la console.
+  db.configDoc('googlebooks').then((c) => setBooksKey(c && c.apiKey));
 }
 
 function registerSW() {

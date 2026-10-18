@@ -2,13 +2,13 @@
    Ne garde que des fichiers de l'app : la coquille, le moteur OCR et les
    trois fichiers du SDK Firebase (versionnés, depuis le CDN officiel), sans
    lesquels l'app ne s'ouvrirait pas hors ligne. Jamais les requêtes vers
-   Firebase (comptes, base de données) ni vers le Wiktionnaire : elles vont
-   toujours au réseau, et le hors-ligne des données passe par le cache de
-   Firestore.
+   Firebase (comptes, base de données), Google Books (recherche et images de
+   couverture) ni le Wiktionnaire : elles vont toujours au réseau, et le
+   hors-ligne des données passe par le cache de Firestore.
    À tester est servie sur le même domaine : on ne touche qu'aux caches
    « lecture-* ».
    Publier une version = incrémenter VERSION (et APP_VERSION dans app.js). */
-const VERSION = 'lecture-v14';
+const VERSION = 'lecture-v15';
 const ASSETS = [
   './',
   './index.html',
@@ -19,6 +19,7 @@ const ASSETS = [
   './account.js',
   './legacy.js',
   './importer.js',
+  './covers.js',
   './manifest.json',
   './icons/icon-180.png',
   './icons/icon-192.png',

@@ -6,6 +6,7 @@
    est gardée. Rien n'est jamais supprimé du compte.
    L'import est ensuite vérifié en relisant le compte sur le serveur. */
 import { STORES, commit, serverDocs } from './db.js';
+import { validCover } from './covers.js';
 
 const EPOCH = '2000-01-01T00:00:00.000Z';   // date de repli, stable d'un import à l'autre
 const SEND_TIMEOUT = 60000;
@@ -65,6 +66,12 @@ function clean(store, raw, id, bookIdOf) {
     out.endDate = date(raw.endDate);
     out.tags = tagList(raw.tags);
     out.rating = Math.max(0, Math.min(5, num(raw.rating) || 0));
+    // Couverture : lien https ou petite vignette seulement.
+    if (!validCover(raw.cover)) {
+      out.cover = null;
+      out.coverSource = null;
+      out.googleBooksId = null;
+    }
     return out;
   }
   out.text = str(raw.text);

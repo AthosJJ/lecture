@@ -10,7 +10,7 @@
    (en mémoire et dans ce cache) et part vers le serveur sans être attendue :
    hors ligne, elle patiente et part au retour du réseau. */
 import {
-  doc, collection, onSnapshot, setDoc, deleteDoc, writeBatch,
+  doc, collection, onSnapshot, setDoc, deleteDoc, writeBatch, getDoc,
   waitForPendingWrites, getDocsFromServer, terminate, clearIndexedDbPersistence
 } from 'https://www.gstatic.com/firebasejs/13.0.0/firebase-firestore.js';
 import { firestore } from './firebase.js';
@@ -164,7 +164,19 @@ export async function flushed(ms = 2500) {
   }
 }
 
-/* Lecture directe sur le serveur (vérification d'un import). */
+/* Document de config/ (clés d'API saisies dans la console Firebase, jamais
+   dans le code) ; lisible une fois connecté, gardé dans le cache hors ligne.
+   null s'il n'existe pas ou reste injoignable. */
+export async function configDoc(name) {
+  try {
+    const snap = await getDoc(doc(firestore, 'config', name));
+    return snap.exists() ? snap.data() : null;
+  } catch {
+    return null;
+  }
+}
+
+/* Lecture directe sur le serveur (vérification d'un import, suppression). */
 export async function serverDocs(store) {
   const snap = await getDocsFromServer(refs[store]);
   return new Map(snap.docs.map((d) => [d.id, d.data()]));
