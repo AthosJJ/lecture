@@ -5,7 +5,7 @@ import { parseBackup, planImport, sendImport, verifyImport, describeCounts } fro
 import { setBooksKey, booksSearchReady, searchBooks, photoThumbnail, googleBooksPage, validCover } from './covers.js';
 
 /* Synchroniser avec VERSION dans sw.js à chaque mise à jour. */
-const APP_VERSION = '16';
+const APP_VERSION = '17';
 
 /* ——— État en mémoire : copie des données du compte, tenue à jour par la
    synchronisation Firestore (db.js) ——— */

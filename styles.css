@@ -676,7 +676,8 @@ input, select, textarea { font: inherit; color: inherit; }
   bottom: var(--kb, 0px);
   max-width: 560px;
   margin: 0 auto;
-  max-height: min(90dvh, calc(var(--vvh, 100dvh) - env(safe-area-inset-top) - 8px));
+  --sheet-max: min(90dvh, calc(var(--vvh, 100dvh) - env(safe-area-inset-top) - 8px));
+  max-height: var(--sheet-max);
   overflow-y: auto;
   overscroll-behavior: contain;
   -webkit-overflow-scrolling: touch;
@@ -689,6 +690,11 @@ input, select, textarea { font: inherit; color: inherit; }
   transition: transform .38s var(--ease), bottom .2s;
 }
 .sheet.open { transform: translateY(0); }
+/* Formulaires (livre, note, citation, mot) : toujours toute la hauteur
+   disponible, au-dessus du clavier quand il est ouvert. Une feuille courte
+   (livre, note) laisserait le champ touché tout en bas, près du clavier :
+   iOS ferait alors glisser l'écran au lieu de laisser la feuille monter. */
+.sheet.tall { height: var(--sheet-max); }
 .sheet.dragging { transition: none; }
 .sheet-head {
   position: sticky; top: 0;
